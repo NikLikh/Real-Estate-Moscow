@@ -14,6 +14,8 @@ LISTING_URL = "https://www.cian.ru/cat.php?deal_type=sale&engine_version=2&offer
 
 OUTPUT_PATH = "support_files/cian_offer_page.html"
 
+OFFER_INDX = 0
+
 
 async def explore():
 
@@ -27,8 +29,8 @@ async def explore():
             'article[data-name="CardComponent"]', timeout=15000
         )
 
-        card = await page.query_selector('div[data-name="LinkArea"] a')
-        href = await card.get_attribute("href")
+        cards = await page.query_selector_all('div[data-name="LinkArea"] a')
+        href = await cards[OFFER_INDX].get_attribute("href")
 
         await page.goto(href)
         await page.wait_for_timeout(5000)
