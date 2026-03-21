@@ -109,12 +109,13 @@ def _parse_metro(soup: BeautifulSoup) -> dict:
         if not name:
             continue
 
-        time_el = item.find("span")
         minutes = None
-        if time_el:
-            match = re.search(r"(\d+)", time_el.get_text())
-            if match:
-                minutes = int(match.group(1))
+        for span in item.find_all("span"):
+            if "мин" in span.get_text():
+                match = re.search(r"(\d+)", span.get_text())
+                if match:
+                    minutes = int(match.group(1))
+                break
 
         stations.append((name, minutes))
 
@@ -139,7 +140,7 @@ def _parse_summary(soup: BeautifulSoup) -> dict:
         "rooms": None,
         "total_area": None,
         "living_area": None,
-        "Kitchen_area": None,
+        "kitchen_area": None,
         "ceiling_height": None,
         "renovation": None,
         "bathrooms": None,
@@ -152,7 +153,7 @@ def _parse_summary(soup: BeautifulSoup) -> dict:
     items = soup.find_all(attrs={"data-name": "OfferSummaryInfoItem"})
 
     for item in items:
-        ps = item.find_all("p", recurcive=False)
+        ps = item.find_all("p", recursive=False)
         if len(ps) < 2:
             continue
         label = ps[0].get_text(strip=True)
@@ -178,6 +179,8 @@ def _parse_summary(soup: BeautifulSoup) -> dict:
                 result[field] = _parse_float(value)
             else:
                 result[field] = value
+
+    return result
 
 
 def _parse_building(soup: BeautifulSoup) -> dict:
