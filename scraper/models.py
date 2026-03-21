@@ -4,7 +4,6 @@
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from math import dist
 
 
 @dataclass
@@ -27,7 +26,7 @@ class FlatOffer:  # Инфо о предложении квартиры
     street: str | None = None
     house_number: str | None = None
     metro_stations: list[tuple[str, int]] | None = None
-    transport_score: int | None = None
+    transport_score: float | None = None
     lat: float | None = None
     lon: float | None = None
 
