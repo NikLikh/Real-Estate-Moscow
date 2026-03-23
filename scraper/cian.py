@@ -47,7 +47,7 @@ class CianScraper:
                 'article[data-name="CardComponent"]', timeout=15000
             )
         except Exception:
-            print("  Карточки не найдены (возможно CAPTCHA)")
+            print("Карточки не найдены")
             return []
 
         cards = await page.query_selector_all('article[data-name="CardComponent"]')
@@ -72,11 +72,8 @@ class CianScraper:
         data["source"] = "cian"
         data["parsed_at"] = datetime.now().isoformat()
 
-        # Текущее объявление — основная запись
         rows = [data]
 
-        # Исторические цены — копии с подменой price и publication_date
-        # Пропускаем если цена совпадает с текущей (дубликат)
         current_price = data.get("price")
         for entry in price_history:
             if entry["price"] == current_price:
@@ -90,12 +87,12 @@ class CianScraper:
         return rows
 
     def _next_page_url(self, page_num: int) -> str:
-        """Формирует URL следующей страницы списка: &p=2, &p=3"""
+        """Формирует URL следующей страницы списка"""
         sep = "&" if "?" in self.base_url else "?"
         return f"{self.base_url}{sep}p={page_num}"
 
     def save_results(self, filename: str = "cian_offers.json"):
-        """Сохраняет результаты в JSON."""
+        """Сохраняет результаты в JSON"""
         if not self.results:
             print("Нет данных для сохранения")
             return
