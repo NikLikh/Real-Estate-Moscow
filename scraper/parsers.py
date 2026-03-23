@@ -3,7 +3,6 @@
 """
 
 import re
-from unittest import result
 
 from bs4 import BeautifulSoup
 
@@ -180,19 +179,119 @@ def _parse_summary(soup: BeautifulSoup) -> dict:
             else:
                 result[field] = value
 
+    title = soup.find(attrs={"data-name": "OfferTitleNew"})
+
+    if title:
+        title_text = title.get_text(strip=True)
+        if "студия" in title_text.lower():
+            result["rooms"] = -1
+        else:
+            match = re.search(r"(\d+)-комн", title_text)
+            if match:
+                result["rooms"] = int(match.group(1))
+
+        if "апартаменты" in title_text.lower():
+            result["is_apartment"] = True
+        else:
+            result["is_apartment"] = False
+
+        floor_info = soup.find_all(attrs={"data-name": "ObjectFactoidsItem"})
+        for item in floor_info:
+            text = item.get_text(strip=True)
+            if "этаж" in text.lower():
+                match = re.search(r"(\d+)\s*из\s*(\d+)", text)
+                if match:
+                    result["floor"] = int(match.group(1))
+                    result["total_floors"] = int(match.group(2))
+                    break
+
+    for item in items:
+        ps = item.find_all("p", recursive=False)
+        if len(ps) < 2:
+            continue
+        label = ps[0].get_text(strip=True)
+        value = ps[1].get_text(strip=True)
+
+        if label == "Тип жилья":
+            result["is_new_building"] = value == "Новостройка"
+
+        if label == "Год постройки":
+            parsed = _parse_float(value)
+            if parsed is not None:
+                result["year_built"] = int(parsed)
+
     return result
 
 
 def _parse_building(soup: BeautifulSoup) -> dict:
     """Извлекает характеристики дома из OfferSummaryInfoItem."""
-    return {}
+    result = {"building_type": None, "parking": None, "elevators": None}
+
+    mapping = {
+        "Тип дома": "building_type",
+        "Парковка": "parking",
+        "Количество лифтов": "elevators",
+    }
+
+    items = soup.find_all(attrs={"data-name": "OfferSummaryInfoItem"})
+    for item in items:
+
+        ps = item.find_all("p", recursive=False)
+
+        if len(ps) < 2:
+            continue
+
+        label = ps[0].get_text(strip=True)
+        value = ps[1].get_text(strip=True)
+
+        if label in mapping:
+            field = mapping[label]
+            result[field] = value
+
+    return result
 
 
 def _parse_newbuilding(soup: BeautifulSoup) -> dict:
     """Извлекает данные о ЖК и застройщике (только для новостроек)."""
-    return {}
+
+    result = {
+        "developer": None,
+        "residential_complex": None,
+        "completion_date": None,
+    }
+
+    title = soup.find(attrs={"data-name": "OfferTitleNew"})
+    if title:
+        title_text = title.get_text(strip=True)
+        match = re.search(r"ЖК\s*[«](.*?)[»]", title_text)
+        if match:
+            result["residential_complex"] = match.group(1)
+
+    specs = soup.find(attrs={"data-name": "NewbuildingSpecifications"})
+    if specs:
+        elements = specs.find_all(["span", "a"])
+        for i, el in enumerate(elements[:-1]):
+            label = el.get_text(strip=True)
+            value = elements[i + 1].get_text(strip=True)
+            if label == "Застройщик":
+                result["developer"] = value
+            elif label == "Сдача комплекса":
+                result["completion_date"] = value
+
+    return result
 
 
 def _parse_meta(soup: BeautifulSoup) -> dict:
     """Извлекает мета-данные: дату обновления, описание."""
-    return {}
+
+    result = {"publication_date": None, "description": None}
+
+    pub_date_el = soup.find(attrs={"data-testid": "metadata-updated-date"})
+    if pub_date_el:
+        result["publication_date"] = pub_date_el.get_text(strip=True)
+
+    description_el = soup.find(attrs={"data-name": "Description"})
+    if description_el:
+        result["description"] = description_el.get_text(strip=True)
+
+    return result
