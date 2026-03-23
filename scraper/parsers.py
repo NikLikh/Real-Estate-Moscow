@@ -2,13 +2,19 @@
 Парсинг HTML-страниц cian
 """
 
+import json
 import re
 
 from bs4 import BeautifulSoup
 
 
-def parse_offer_page(html: str) -> dict:
-    """Парсит HTML страницы объявления cian.ru, возвращает dict полей FlatOffer."""
+def parse_offer_page(html: str) -> tuple[dict, list[dict]]:
+    """
+    Парсит HTML страницы объявления cian.ru.
+    Возвращает (data, price_history):
+      - data: dict с текущими данными объявления
+      - price_history: list[dict] с историей цен [{"price": ..., "date": ...}, ...]
+    """
     soup = BeautifulSoup(html, "html.parser")
     data = {}
     data.update(_parse_price(soup))
@@ -18,7 +24,10 @@ def parse_offer_page(html: str) -> dict:
     data.update(_parse_building(soup))
     data.update(_parse_newbuilding(soup))
     data.update(_parse_meta(soup))
-    return data
+
+    price_history = _parse_price_history(soup)
+
+    return data, price_history
 
 
 def _parse_float(text: str) -> float | None:
@@ -28,7 +37,7 @@ def _parse_float(text: str) -> float | None:
 
 
 def _parse_price(soup: BeautifulSoup) -> dict:
-    """Извлекает цену, цену за м2, скидку, условия сделки."""
+    """Извлекает цену, цену за м2, скидку, условия сделки"""
     result = {
         "price": None,
         "price_per_m2": None,
@@ -64,7 +73,7 @@ def _parse_price(soup: BeautifulSoup) -> dict:
 
 
 def _parse_address(soup: BeautifulSoup) -> dict:
-    """Извлекает адрес: город, округ, район, улица, дом."""
+    """Извлекает адрес: город, округ, район, улица, дом"""
     result = {
         "city": None,
         "region": None,
@@ -98,7 +107,7 @@ def _parse_address(soup: BeautifulSoup) -> dict:
 
 
 def _parse_metro(soup: BeautifulSoup) -> dict:
-    """Извлекает список станций метро с временем до них в минутах."""
+    """Извлекает список станций метро с временем до них в минутах"""
     stations = []
     metro_items = soup.find_all(attrs={"data-name": "UndergroundItem"})
 
@@ -224,7 +233,7 @@ def _parse_summary(soup: BeautifulSoup) -> dict:
 
 
 def _parse_building(soup: BeautifulSoup) -> dict:
-    """Извлекает характеристики дома из OfferSummaryInfoItem."""
+    """Извлекает характеристики дома из OfferSummaryInfoItem"""
     result = {"building_type": None, "parking": None, "elevators": None}
 
     mapping = {
@@ -252,7 +261,7 @@ def _parse_building(soup: BeautifulSoup) -> dict:
 
 
 def _parse_newbuilding(soup: BeautifulSoup) -> dict:
-    """Извлекает данные о ЖК и застройщике (только для новостроек)."""
+    """Извлекает данные о ЖК и застройщике (только для новостроек)"""
 
     result = {
         "developer": None,
@@ -282,7 +291,7 @@ def _parse_newbuilding(soup: BeautifulSoup) -> dict:
 
 
 def _parse_meta(soup: BeautifulSoup) -> dict:
-    """Извлекает мета-данные: дату обновления, описание."""
+    """Извлекает мета-данные: дату обновления, описание"""
 
     result = {"publication_date": None, "description": None}
 
@@ -295,3 +304,26 @@ def _parse_meta(soup: BeautifulSoup) -> dict:
         result["description"] = description_el.get_text(strip=True)
 
     return result
+
+
+def _parse_price_history(soup: BeautifulSoup) -> list[dict]:
+    """Извлекает историю цен из json на странице объявления"""
+    price_history = []
+    script = soup.find_all("script")
+    for s in script:
+        text = s.string or ""
+        if "priceChanges" in text:
+            match = re.search(r'"priceChanges":\s*(\[.*?\])', text)
+            if match:
+                try:
+                    changes = json.loads(match.group(1))
+                    for item in changes:
+                        price_history.append(
+                            {
+                                "price": item["priceData"]["price"],
+                                "date": item["changeTime"][:10],
+                            }
+                        )
+                except json.JSONDecodeError:
+                    pass
+    return price_history
