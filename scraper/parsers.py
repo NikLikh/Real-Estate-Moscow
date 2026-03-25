@@ -142,7 +142,7 @@ def _parse_metro(soup: BeautifulSoup) -> dict:
 
 def _parse_summary(soup: BeautifulSoup) -> dict:
     """
-    Извлекает характеристики квартиры: площадь, ремонт, санузел, балкон, вид из окон.
+    Извлекает характеристики квартиры: площадь, ремонт, санузел, балкон, вид из окон
     """
     result = {
         "rooms": None,

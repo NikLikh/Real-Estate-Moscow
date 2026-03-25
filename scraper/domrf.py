@@ -24,14 +24,14 @@ REGIONS = {
         "%D1%81%D0%B5%D1%80%D0%B2%D0%B8%D1%81%D1%8B/"
         "%D0%BA%D0%B0%D1%82%D0%B0%D0%BB%D0%BE%D0%B3-%D0%BA%D0%B2%D0%B0%D1%80%D1%82%D0%B8%D1%80/"
         "%D1%81%D0%BF%D0%B8%D1%81%D0%BE%D0%BA"
-        "?flatStatus=free%2Cbooked&page={page}&limit=20&place=0-1"
+        "?flatStatus=free%2Cbooked&page={page}&limit=100&place=0-1"
     ),
     "mo": (
         "https://xn--80az8a.xn--d1aqf.xn--p1ai/"
         "%D1%81%D0%B5%D1%80%D0%B2%D0%B8%D1%81%D1%8B/"
         "%D0%BA%D0%B0%D1%82%D0%B0%D0%BB%D0%BE%D0%B3-%D0%BA%D0%B2%D0%B0%D1%80%D1%82%D0%B8%D1%80/"
         "%D1%81%D0%BF%D0%B8%D1%81%D0%BE%D0%BA"
-        "?flatStatus=free%2Cbooked&page={page}&limit=20&place=50"
+        "?flatStatus=free%2Cbooked&page={page}&limit=100&place=50"
     ),
 }
 
@@ -79,7 +79,7 @@ class DomrfScraper:
         await page.wait_for_timeout(3000)
 
     async def _get_flat_urls(self, page) -> list[str]:
-        """Собирает URL квартир с текущей страницы листинга."""
+        """Собирает URL квартир с текущей страницы листинга"""
         links = await page.query_selector_all('a[href*="/квартира/"]')
         urls = []
         for link in links:
@@ -117,40 +117,74 @@ class DomrfScraper:
             json.dump(self.results, f, ensure_ascii=False, indent=2)
         print(f"\nСохранено {len(self.results)} записей → {output_path}")
 
+    async def _scrape_listing(self, page, region: str):
+        """Последовательно проходит страницы листинга, собирает URL квартир."""
+        all_urls = []
+        for page_num in range(self.max_pages):
+            listing_url = REGIONS[region].format(page=page_num)
+            print(f"  [{region}] Листинг {page_num + 1}: {listing_url}")
+            try:
+                await page.goto(listing_url, timeout=30000)
+                await self._wait_for_content(page)
+                urls = await self._get_flat_urls(page)
+                if not urls:
+                    print(f"  [{region}] Нет квартир, стоп.")
+                    break
+                all_urls.extend(urls)
+                print(f"  [{region}] +{len(urls)} квартир (всего {len(all_urls)})")
+            except Exception as e:
+                print(f"  [{region}] Ошибка листинга: {e}")
+        return all_urls
+
+    async def _parse_flat_with_semaphore(self, semaphore, context, url):
+        """Парсит одну квартиру, контролируемый семафором."""
+        async with semaphore:
+            page = await context.new_page()
+            try:
+                data = await self._parse_flat(page, url)
+                if data:
+                    self.results.append(data)
+                    print(f"  Парсинг {url[-40:]} — ок")
+            except Exception as e:
+                print(f"  Ошибка: {url[-40:]} — {e}")
+            finally:
+                await page.close()
+            await asyncio.sleep(random.uniform(*self.delay_range))
+
     async def scrape(self):
+        PARALLEL_WORKERS = 4
+
         async with async_playwright() as p:
             browser = await p.firefox.launch(headless=self.headless)
-            page = await browser.new_page()
+            context = await browser.new_context()
+            semaphore = asyncio.Semaphore(PARALLEL_WORKERS)
 
             for region in self.regions:
-                print(f"\nРегион: {region}")
-                for page_num in range(self.max_pages):
-                    listing_url = REGIONS[region].format(page=page_num)
-                    print(f"  Страница {page_num + 1}: {listing_url}")
-                    try:
-                        await page.goto(listing_url, timeout=30000)
-                        await self._wait_for_content(page)
-                        urls = await self._get_flat_urls(page)
-                        if not urls:
-                            print("Нет квартир, переходим к следующему региону")
-                            break
-                        print(f"Найдено {len(urls)} квартир")
-                        for flat_url in urls:
-                            try:
-                                data = await self._parse_flat(page, flat_url)
-                                if data:
-                                    self.results.append(data)
-                                    print(f"Парсинг {flat_url[:60]} — ок")
-                            except Exception as e:
-                                print(f"Ошибка: {flat_url[:60]} — {e}")
-                            await asyncio.sleep(random.uniform(*self.delay_range))
-                    except Exception as e:
-                        print(f"Ошибка загрузки листинга: {e}")
+                print(f"\n{'='*50}")
+                print(f"РЕГИОН: {region}")
+                print(f"{'='*50}")
 
+                # 1. Собираем URL последовательно (одна вкладка)
+                listing_page = await context.new_page()
+                urls = await self._scrape_listing(listing_page, region)
+                await listing_page.close()
+                print(f"[{region}] Собрано {len(urls)} URL квартир")
+
+                # 2. Парсим квартиры параллельно (семафор)
+                tasks = [
+                    self._parse_flat_with_semaphore(semaphore, context, url)
+                    for url in urls
+                ]
+                await asyncio.gather(*tasks)
+
+                print(f"[{region}] Завершён. Всего записей: {len(self.results)}")
+
+            await context.close()
             await browser.close()
+
         self.save_results()
 
 
 if __name__ == "__main__":
-    scraper = DomrfScraper(regions=["moscow"], max_pages=2)
+    scraper = DomrfScraper(regions=["moscow", "mo"], max_pages=100)
     asyncio.run(scraper.scrape())
