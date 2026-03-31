@@ -1,11 +1,3 @@
-"""
-Скрипт-разведчик для наш.дом.рф: сохраняет HTML страницы
-списка новостроек и страницы конкретного ЖК для анализа разметки.
-
-Запуск:
-    python -m scraper.explore_domrf
-"""
-
 import asyncio
 from pathlib import Path
 
@@ -18,49 +10,36 @@ LISTING_URL = (
     "%D1%81%D0%BF%D0%B8%D1%81%D0%BE%D0%BA"
     "?flatStatus=free%2Cbooked&page=0&limit=20&place=0-1"
 )
-
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 OUTPUT_LISTING = PROJECT_ROOT / "support_files" / "domrf_listing_page.html"
 OUTPUT_OFFER = PROJECT_ROOT / "support_files" / "domrf_offer_page.html"
 
 
 async def explore():
-
     async with async_playwright() as p:
-
-        browser = await p.chromium.launch(headless=False)
+        browser = await p.firefox.launch(headless=False)
         page = await browser.new_page()
         await page.goto(LISTING_URL)
+        await page.wait_for_timeout(15000)
 
-        print("Ожидание загрузки страницы...")
-        try:
-            await page.wait_for_selector("text=Каталог", timeout=30000)
-        except Exception:
-            print("Страница не загрузилась за 30 сек")
-            await page.wait_for_timeout(30000)
-
-        await page.wait_for_timeout(3000)
-
-        listing_content = await page.content()
         with open(OUTPUT_LISTING, "w", encoding="utf-8") as f:
-            f.write(listing_content)
-        print(f"Listing сохранён: {len(listing_content)} chars")
+            f.write(await page.content())
 
         link = await page.query_selector('a[href*="/квартира/"]')
         if not link:
-            print("Не удалось найти ссылку на ЖК")
+            print("Не удалось найти ссылку на квартиру")
             await browser.close()
             return
+
         href = await link.get_attribute("href")
         if href and not href.startswith("http"):
             href = "https://xn--80az8a.xn--d1aqf.xn--p1ai" + href
 
         await page.goto(href)
-        await page.wait_for_timeout(5000)
+        await page.wait_for_timeout(15000)
 
-        offer_content = await page.content()
         with open(OUTPUT_OFFER, "w", encoding="utf-8") as f:
-            f.write(offer_content)
+            f.write(await page.content())
 
         await browser.close()
 

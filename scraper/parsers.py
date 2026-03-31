@@ -1,7 +1,3 @@
-"""
-Парсинг HTML-страниц cian
-"""
-
 import json
 import re
 
@@ -9,12 +5,6 @@ from bs4 import BeautifulSoup
 
 
 def parse_offer_page(html: str) -> tuple[dict, list[dict]]:
-    """
-    Парсит HTML страницы объявления cian.ru.
-    Возвращает (data, price_history):
-      - data: dict с текущими данными объявления
-      - price_history: list[dict] с историей цен [{"price": ..., "date": ...}, ...]
-    """
     soup = BeautifulSoup(html, "html.parser")
     data = {}
     data.update(_parse_price(soup))
@@ -24,20 +14,15 @@ def parse_offer_page(html: str) -> tuple[dict, list[dict]]:
     data.update(_parse_building(soup))
     data.update(_parse_newbuilding(soup))
     data.update(_parse_meta(soup))
-
-    price_history = _parse_price_history(soup)
-
-    return data, price_history
+    return data, _parse_price_history(soup)
 
 
 def _parse_float(text: str) -> float | None:
-    """Парсит число из строки, например '44,1 м2' → 44.1"""
     match = re.search(r"[\d,\.]+", text)
     return float(match.group().replace(",", ".")) if match else None
 
 
 def _parse_price(soup: BeautifulSoup) -> dict:
-    """Извлекает цену, цену за м2, скидку, условия сделки"""
     result = {
         "price": None,
         "price_per_m2": None,
@@ -51,8 +36,7 @@ def _parse_price(soup: BeautifulSoup) -> dict:
         if digits:
             result["price"] = int(digits)
 
-    facts = soup.find_all(attrs={"data-name": "OfferFactItem"})
-    for fact in facts:
+    for fact in soup.find_all(attrs={"data-name": "OfferFactItem"}):
         text = fact.get_text(" ", strip=True)
         if "₽/м²" in text:
             digits = re.sub(r"[^\d]", "", text.split("₽")[0])
@@ -73,7 +57,6 @@ def _parse_price(soup: BeautifulSoup) -> dict:
 
 
 def _parse_address(soup: BeautifulSoup) -> dict:
-    """Извлекает адрес: город, округ, район, улица, дом"""
     result = {
         "city": None,
         "region": None,
@@ -107,11 +90,9 @@ def _parse_address(soup: BeautifulSoup) -> dict:
 
 
 def _parse_metro(soup: BeautifulSoup) -> dict:
-    """Извлекает список станций метро с временем до них в минутах"""
     stations = []
-    metro_items = soup.find_all(attrs={"data-name": "UndergroundItem"})
 
-    for item in metro_items:
+    for item in soup.find_all(attrs={"data-name": "UndergroundItem"}):
         name_el = item.find("a")
         name = name_el.get_text(strip=True) if name_el else None
         if not name:
@@ -141,9 +122,6 @@ def _parse_metro(soup: BeautifulSoup) -> dict:
 
 
 def _parse_summary(soup: BeautifulSoup) -> dict:
-    """
-    Извлекает характеристики квартиры: площадь, ремонт, санузел, балкон, вид из окон
-    """
     result = {
         "rooms": None,
         "total_area": None,
@@ -154,8 +132,19 @@ def _parse_summary(soup: BeautifulSoup) -> dict:
         "bathrooms": None,
         "balcony": None,
         "window_view": None,
-        "is_apartment": None,
-        "description": None,
+        "is_apartments": None,
+    }
+
+    mapping = {
+        "Общая площадь": "total_area",
+        "Жилая площадь": "living_area",
+        "Площадь кухни": "kitchen_area",
+        "Высота потолков": "ceiling_height",
+        "Ремонт": "renovation",
+        "Отделка": "renovation",
+        "Санузел": "bathrooms",
+        "Балкон/лоджия": "balcony",
+        "Вид из окон": "window_view",
     }
 
     items = soup.find_all(attrs={"data-name": "OfferSummaryInfoItem"})
@@ -167,59 +156,12 @@ def _parse_summary(soup: BeautifulSoup) -> dict:
         label = ps[0].get_text(strip=True)
         value = ps[1].get_text(strip=True)
 
-        mapping = {
-            "Общая площадь": "total_area",
-            "Жилая площадь": "living_area",
-            "Площадь кухни": "kitchen_area",
-            "Высота потолков": "ceiling_height",
-            "Ремонт": "renovation",
-            "Отделка": "renovation",
-            "Санузел": "bathrooms",
-            "Балкон/лоджия": "balcony",
-            "Вид из окон": "window_view",
-        }
-
         if label in mapping:
             field = mapping[label]
-            if field in ["total_area", "living_area", "kitchen_area"]:
-                result[field] = _parse_float(value)
-            elif field == "ceiling_height":
+            if field in ("total_area", "living_area", "kitchen_area", "ceiling_height"):
                 result[field] = _parse_float(value)
             else:
                 result[field] = value
-
-    title = soup.find(attrs={"data-name": "OfferTitleNew"})
-
-    if title:
-        title_text = title.get_text(strip=True)
-        if "студия" in title_text.lower():
-            result["rooms"] = -1
-        else:
-            match = re.search(r"(\d+)-комн", title_text)
-            if match:
-                result["rooms"] = int(match.group(1))
-
-        if "апартаменты" in title_text.lower():
-            result["is_apartment"] = True
-        else:
-            result["is_apartment"] = False
-
-        floor_info = soup.find_all(attrs={"data-name": "ObjectFactoidsItem"})
-        for item in floor_info:
-            text = item.get_text(strip=True)
-            if "этаж" in text.lower():
-                match = re.search(r"(\d+)\s*из\s*(\d+)", text)
-                if match:
-                    result["floor"] = int(match.group(1))
-                    result["total_floors"] = int(match.group(2))
-                    break
-
-    for item in items:
-        ps = item.find_all("p", recursive=False)
-        if len(ps) < 2:
-            continue
-        label = ps[0].get_text(strip=True)
-        value = ps[1].get_text(strip=True)
 
         if label == "Тип жилья":
             result["is_new_building"] = value == "Новостройка"
@@ -229,11 +171,31 @@ def _parse_summary(soup: BeautifulSoup) -> dict:
             if parsed is not None:
                 result["year_built"] = int(parsed)
 
+    title = soup.find(attrs={"data-name": "OfferTitleNew"})
+    if title:
+        title_text = title.get_text(strip=True)
+        if "студия" in title_text.lower():
+            result["rooms"] = -1
+        else:
+            match = re.search(r"(\d+)-комн", title_text)
+            if match:
+                result["rooms"] = int(match.group(1))
+
+        result["is_apartments"] = "апартаменты" in title_text.lower()
+
+    for item in soup.find_all(attrs={"data-name": "ObjectFactoidsItem"}):
+        text = item.get_text(strip=True)
+        if "этаж" in text.lower():
+            match = re.search(r"(\d+)\s*из\s*(\d+)", text)
+            if match:
+                result["floor"] = int(match.group(1))
+                result["total_floors"] = int(match.group(2))
+                break
+
     return result
 
 
 def _parse_building(soup: BeautifulSoup) -> dict:
-    """Извлекает характеристики дома из OfferSummaryInfoItem"""
     result = {"building_type": None, "parking": None, "elevators": None}
 
     mapping = {
@@ -242,27 +204,19 @@ def _parse_building(soup: BeautifulSoup) -> dict:
         "Количество лифтов": "elevators",
     }
 
-    items = soup.find_all(attrs={"data-name": "OfferSummaryInfoItem"})
-    for item in items:
-
+    for item in soup.find_all(attrs={"data-name": "OfferSummaryInfoItem"}):
         ps = item.find_all("p", recursive=False)
-
         if len(ps) < 2:
             continue
-
         label = ps[0].get_text(strip=True)
         value = ps[1].get_text(strip=True)
-
         if label in mapping:
-            field = mapping[label]
-            result[field] = value
+            result[mapping[label]] = value
 
     return result
 
 
 def _parse_newbuilding(soup: BeautifulSoup) -> dict:
-    """Извлекает данные о ЖК и застройщике (только для новостроек)"""
-
     result = {
         "developer": None,
         "residential_complex": None,
@@ -271,8 +225,7 @@ def _parse_newbuilding(soup: BeautifulSoup) -> dict:
 
     title = soup.find(attrs={"data-name": "OfferTitleNew"})
     if title:
-        title_text = title.get_text(strip=True)
-        match = re.search(r"ЖК\s*[«](.*?)[»]", title_text)
+        match = re.search(r"ЖК\s*[«](.*?)[»]", title.get_text(strip=True))
         if match:
             result["residential_complex"] = match.group(1)
 
@@ -291,8 +244,6 @@ def _parse_newbuilding(soup: BeautifulSoup) -> dict:
 
 
 def _parse_meta(soup: BeautifulSoup) -> dict:
-    """Извлекает мета-данные: дату обновления, описание"""
-
     result = {"publication_date": None, "description": None}
 
     pub_date_el = soup.find(attrs={"data-testid": "metadata-updated-date"})
@@ -307,23 +258,18 @@ def _parse_meta(soup: BeautifulSoup) -> dict:
 
 
 def _parse_price_history(soup: BeautifulSoup) -> list[dict]:
-    """Извлекает историю цен из json на странице объявления"""
-    price_history = []
-    script = soup.find_all("script")
-    for s in script:
+    for s in soup.find_all("script"):
         text = s.string or ""
-        if "priceChanges" in text:
-            match = re.search(r'"priceChanges":\s*(\[.*?\])', text)
-            if match:
-                try:
-                    changes = json.loads(match.group(1))
-                    for item in changes:
-                        price_history.append(
-                            {
-                                "price": item["priceData"]["price"],
-                                "date": item["changeTime"][:10],
-                            }
-                        )
-                except json.JSONDecodeError:
-                    pass
-    return price_history
+        if "priceChanges" not in text:
+            continue
+        match = re.search(r'"priceChanges":\s*(\[.*?\])', text)
+        if not match:
+            continue
+        try:
+            return [
+                {"price": item["priceData"]["price"], "date": item["changeTime"][:10]}
+                for item in json.loads(match.group(1))
+            ]
+        except (json.JSONDecodeError, KeyError):
+            pass
+    return []

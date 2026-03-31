@@ -1,25 +1,17 @@
-"""
-Схема данных для парсеров и исторических данных kaggle
-"""
-
 from dataclasses import dataclass, field
 from datetime import datetime
 
 
 @dataclass
-class FlatOffer:  # Инфо о предложении квартиры
-
-    # id
+class FlatOffer:
     url: str
     source: str
 
-    # цена
     price: int | None = None
     price_per_m2: int | None = None
     discount_pct: int | None = None
     deal_conditions: str | None = None
 
-    # Локация
     city: str | None = None
     region: str | None = None
     district: str | None = None
@@ -30,7 +22,6 @@ class FlatOffer:  # Инфо о предложении квартиры
     lat: float | None = None
     lon: float | None = None
 
-    # Инфо о квартире
     rooms: int | None = None
     total_area: float | None = None
     living_area: float | None = None
@@ -44,19 +35,16 @@ class FlatOffer:  # Инфо о предложении квартиры
     is_apartments: bool | None = None
     description: str | None = None
 
-    # Инфо о доме
     total_floors: int | None = None
     year_built: int | None = None
     building_type: str | None = None
     parking: str | None = None
-    elevators: int | None = None
+    elevators: str | None = None
     is_new_building: bool | None = None
 
-    # Застройщик
     developer: str | None = None
     residential_complex: str | None = None
     completion_date: str | None = None
 
-    # Мета
     publication_date: datetime | None = None
     parsed_at: datetime = field(default_factory=datetime.now)

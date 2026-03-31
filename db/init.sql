@@ -1,5 +1,3 @@
-
-
 CREATE TABLE IF NOT EXISTS flats (
     id SERIAL PRIMARY KEY,
     url TEXT NOT NULL,
@@ -40,6 +38,6 @@ CREATE TABLE IF NOT EXISTS flats (
     description TEXT,
     publication_date TEXT,
     parsed_at TIMESTAMP DEFAULT NOW(),
-    
+
     UNIQUE (url, source, price)
 );

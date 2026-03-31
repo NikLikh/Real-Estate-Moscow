@@ -47,10 +47,10 @@ class DomrfScraper:
         headless: bool = False,
     ):
         """
-        regions:      список регионов
-        max_pages:    сколько страниц пройти на регион
-        delay_range:  задержка между запросами к квартирам
-        headless:     без окна браузера
+        regions: список регионов
+        max_pages: сколько страниц пройти на регион
+        delay_range: задержка между запросами к квартирам
+        headless: без окна браузера
         """
         self.regions = regions or ["moscow"]
         self.max_pages = max_pages
@@ -118,43 +118,60 @@ class DomrfScraper:
         print(f"\nСохранено {len(self.results)} записей → {output_path}")
 
     async def _scrape_listing(self, page, region: str):
-        """Последовательно проходит страницы листинга, собирает URL квартир."""
+        """Последовательно проходит страницы листинга, собирает URL квартир"""
         all_urls = []
+
         for page_num in range(self.max_pages):
+
             listing_url = REGIONS[region].format(page=page_num)
             print(f"  [{region}] Листинг {page_num + 1}: {listing_url}")
+
             try:
+
                 await page.goto(listing_url, timeout=30000)
                 await self._wait_for_content(page)
                 urls = await self._get_flat_urls(page)
+
                 if not urls:
                     print(f"  [{region}] Нет квартир, стоп.")
                     break
+
                 all_urls.extend(urls)
                 print(f"  [{region}] +{len(urls)} квартир (всего {len(all_urls)})")
+
             except Exception as e:
                 print(f"  [{region}] Ошибка листинга: {e}")
+
         return all_urls
 
     async def _parse_flat_with_semaphore(self, semaphore, context, url):
-        """Парсит одну квартиру, контролируемый семафором."""
+        """Парсит одну квартиру"""
+
         async with semaphore:
+
             page = await context.new_page()
+
             try:
                 data = await self._parse_flat(page, url)
+
                 if data:
                     self.results.append(data)
                     print(f"  Парсинг {url[-40:]} — ок")
+
             except Exception as e:
                 print(f"  Ошибка: {url[-40:]} — {e}")
+
             finally:
                 await page.close()
+
             await asyncio.sleep(random.uniform(*self.delay_range))
 
     async def scrape(self):
+
         PARALLEL_WORKERS = 4
 
         async with async_playwright() as p:
+
             browser = await p.firefox.launch(headless=self.headless)
             context = await browser.new_context()
             semaphore = asyncio.Semaphore(PARALLEL_WORKERS)
@@ -164,13 +181,13 @@ class DomrfScraper:
                 print(f"РЕГИОН: {region}")
                 print(f"{'='*50}")
 
-                # 1. Собираем URL последовательно (одна вкладка)
+                # Собираем URL
                 listing_page = await context.new_page()
                 urls = await self._scrape_listing(listing_page, region)
                 await listing_page.close()
                 print(f"[{region}] Собрано {len(urls)} URL квартир")
 
-                # 2. Парсим квартиры параллельно (семафор)
+                # Парсим квартиры параллельно
                 tasks = [
                     self._parse_flat_with_semaphore(semaphore, context, url)
                     for url in urls

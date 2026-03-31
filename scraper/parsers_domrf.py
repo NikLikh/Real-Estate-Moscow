@@ -1,15 +1,9 @@
-"""
-Парсинг HTML-страниц наш.дом.рф
-"""
-
 import re
-from unittest import result
 
 from bs4 import BeautifulSoup
 
 
 def parse_domrf_offer(html: str) -> dict:
-    """Парсит HTML страницы квартиры на дом.рф, возвращает dict полей FlatOffer"""
     soup = BeautifulSoup(html, "html.parser")
     data = {}
     data.update(_parse_price_domrf(soup))
@@ -20,12 +14,10 @@ def parse_domrf_offer(html: str) -> dict:
 
 
 def _find(soup, class_contains: str):
-    """Поиск элемента по частичному имени styled-component класса"""
     return soup.find(class_=lambda c: c and class_contains in c)
 
 
 def _find_all(soup, class_contains: str):
-    """Поиск всех элементов по частичному имени styled-component класса"""
     return soup.find_all(class_=lambda c: c and class_contains in c)
 
 
@@ -35,7 +27,6 @@ def _parse_float(text: str) -> float | None:
 
 
 def _parse_price_domrf(soup: BeautifulSoup) -> dict:
-    """Извлекает цену и цену за м²"""
     result = {"price": None, "price_per_m2": None}
 
     price_el = _find(soup, "PriceBlock__Price-")
@@ -65,8 +56,7 @@ def _parse_flat_domrf(soup: BeautifulSoup) -> dict:
         "rooms": None,
     }
 
-    items = _find_all(soup, "Characteristics__PropertyInfo")
-    for item in items:
+    for item in _find_all(soup, "Characteristics__PropertyInfo"):
         text = item.get_text(" | ", strip=True)
         if "Общая площадь" in text:
             result["total_area"] = _parse_float(text.split("|")[1])
@@ -112,9 +102,6 @@ def _parse_building_domrf(soup: BeautifulSoup) -> dict:
     if title:
         result["residential_complex"] = title.get_text(strip=True)
 
-        if "," in title.get_text(strip=True):
-            result["district"] = title.get_text(strip=True).split(",")[1].strip()
-
     address = _find(soup, "BuildingCard__Address")
     if address:
         city_text = address.get_text(strip=True).split(",")[0].strip()
@@ -132,15 +119,9 @@ def _parse_building_domrf(soup: BeautifulSoup) -> dict:
             if re.search(r"\d+", time_text)
             else None
         )
-        result["metro_stations"].append(
-            {
-                "name": name.get_text(strip=True),
-                "minutes": minutes,
-            }
-        )
+        result["metro_stations"].append((name.get_text(strip=True), minutes))
 
     completion_date = _find(soup, "BuildingCard__RowValue")
-
     if completion_date:
         result["completion_date"] = completion_date.get_text(strip=True)
 
@@ -152,12 +133,12 @@ def _parse_building_domrf(soup: BeautifulSoup) -> dict:
 
 
 def _parse_meta_domrf(soup: BeautifulSoup) -> dict:
-    """Извлекает дату обновления"""
     result = {"publication_date": None}
 
     updated = _find(soup, "PriceBlock__CaptionUpdatedAt")
-    match = re.search(r"(\d{2}\.\d{2}\.\d{4})", updated.get_text())
-    if match:
-        result["publication_date"] = match.group(1)
+    if updated:
+        match = re.search(r"(\d{2}\.\d{2}\.\d{4})", updated.get_text())
+        if match:
+            result["publication_date"] = match.group(1)
 
     return result

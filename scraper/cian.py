@@ -31,9 +31,9 @@ class CianScraper:
         headless: bool = False,
     ):
         """
-        base_url:     URL страницы списка
-        max_pages:    сколько страниц списка пройти
-        delay_range:  диапазон случайной задержки между запросами
+        base_url: URL страницы списка
+        max_pages: сколько страниц списка пройти
+        delay_range: диапазон случайной задержки между запросами
         headless
         """
         self.base_url = base_url
@@ -216,7 +216,7 @@ class CianScraper:
 
 
 if __name__ == "__main__":
-    # Разбиваем по регион × комнатность — обходим лимит 54 стр
+    # Разбиваем по регион × комнатность, чтобы обойти лимит 54 стр
     REGIONS = {
         "Москва": "region=1",
         "МО": "region=4593",
@@ -230,8 +230,8 @@ if __name__ == "__main__":
         "5+комн": "room5=1&room6=1",
     }
     PRICES = {
-        # "до5М": "minprice=0&maxprice=5000000",
-        # "5-10М": "minprice=5000000&maxprice=10000000",
+        "до5М": "minprice=0&maxprice=5000000",
+        "5-10М": "minprice=5000000&maxprice=10000000",
         "10-20М": "minprice=10000000&maxprice=20000000",
         "20-50М": "minprice=20000000&maxprice=50000000",
         "50М+": "minprice=50000000",
@@ -239,7 +239,7 @@ if __name__ == "__main__":
 
     BASE = "https://www.cian.ru/cat.php?deal_type=sale&engine_version=2&offer_type=flat"
 
-    # Генерируем: 2 региона × 6 комнат × 5 цен = 60 фильтров × 54 стр ≈ 90K URL
+    # 2 региона × 6 комнат × 5 цен = 60 фильтров × 54 стр ~ 90K URL
     FILTERS = []
     for reg_name, reg_param in REGIONS.items():
         for room_name, room_param in ROOMS.items():
@@ -262,7 +262,7 @@ if __name__ == "__main__":
             scraper = CianScraper(base_url=filt["url"], max_pages=54)
             scraper.seen_urls = shared_seen_urls
 
-            print(f"  СТАРТ: {filt['label']}")
+            print(f"СТАРТ: {filt['label']}")
 
             try:
                 await scraper.scrape(page, label=filt["label"])
