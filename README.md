@@ -21,6 +21,18 @@
 4. Преобразование данных в удобный формат для анализа (в частности, необходимо получить данные о временных изменениях цен на недвижимость). 
 
 
+**Запуск**
+
+```
+.venv\Scripts\activate 
+docker compose up -d # поднимает s3 и постгрес
+cat db/init.sql | docker exec -i postgres psql -U user -d real_estate # создаёт таблицу
+
+python -m scraper.cian # запускает скраппер циана
+python -m scraper.domrf # запускает скраппер домру
+python -m db.load_kaggle # загружает датасеты из kaggle
+```
+
 **Источники данных**:
 *Исторические*
 1.  https://www.kaggle.com/datasets/mrdaniilak/russia-real-estate-2021

@@ -1,6 +1,8 @@
 import json
+import math
 import sys
 
+import pandas as pd
 import psycopg2
 from psycopg2.extras import Json
 
@@ -34,16 +36,67 @@ INSERT_SQL = """
 )
 
 
+def _clean_value(value):
+    if value is None:
+        return None
+    if isinstance(value, float) and (math.isnan(value) or math.isinf(value)):
+        return None
+    try:
+        if pd.isna(value):
+            return None
+    except (TypeError, ValueError):
+        pass
+    return value
+
+
 def _build_row(record: dict) -> dict:
     row = {}
     for col in COLUMNS:
-        value = record.get(col)
+        value = _clean_value(record.get(col))
         if col == "metro_stations" and value is not None:
             value = Json(value)
         if col == "is_apartments" and value is None:
-            value = record.get("is_apartment")
+            value = _clean_value(record.get("is_apartment"))
         row[col] = value
     return row
+
+
+def get_cached_urls(sources: list[str]) -> set[str]:
+    """Достает URL уже спарсенных квартир из БД."""
+    conn = psycopg2.connect(**DB_CONFIG)
+    cur = conn.cursor()
+    placeholders = ",".join(["%s"] * len(sources))
+    cur.execute(f"SELECT DISTINCT url FROM flats WHERE source IN ({placeholders})", sources)
+    urls = {row[0] for row in cur.fetchall()}
+    cur.close()
+    conn.close()
+    return urls
+
+
+def save_rows(rows: list[dict]) -> int:
+    """Вставляет записи в PG. Возвращает кол-во вставленных."""
+    if not rows:
+        return 0
+
+    conn = psycopg2.connect(**DB_CONFIG)
+    cur = conn.cursor()
+    saved = 0
+
+    for row_data in rows:
+        row = _build_row(row_data)
+        if row.get("price") is None:
+            continue
+        try:
+            cur.execute(INSERT_SQL, row)
+            saved += cur.rowcount
+        except Exception as e:
+            conn.rollback()
+            print(f"  Ошибка записи в БД: {e}")
+
+    conn.commit()
+    cur.close()
+    conn.close()
+    return saved
 
 
 def load_json_to_pg(json_path: str):
