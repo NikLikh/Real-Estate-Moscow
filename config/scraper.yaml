@@ -1,0 +1,94 @@
+cian_base: "https://www.cian.ru/cat.php?deal_type=sale&engine_version=2&offer_type=flat"
+
+# при старте проверяет direct IP, VLESS SOCKS5, VDS SSH tunnel
+# оставляет только endpoints с уникальными IP
+auto_discover: true
+vless_socks_port: 10808
+vds_socks_port: 9080
+
+# fallback если auto_discover: false
+endpoints:
+  - name: direct
+    proxy: null
+    rate_limit: 0.1
+
+regions:
+  msk:
+    id: 1
+    rooms:
+      studio: "room0=1"
+      1-room: "room1=1"
+      2-room: "room2=1"
+      3-room: "room3=1"
+      4-room: "room4=1"
+      5+room: "room5=1&room6=1"
+    prices:
+      - [10_000_000, 15_000_000]
+      - [15_000_000, 20_000_000]
+      - [20_000_000, 30_000_000]
+      - [30_000_000, 50_000_000]
+      - [50_000_000, 100_000_000]
+      - [100_000_000, null]
+    object_types:
+      new: "object_type%5B0%5D=1"
+      resale: "object_type%5B0%5D=2"
+
+  mo:
+    id: 4593
+    rooms:
+      studio: "room0=1"
+      1-room: "room1=1"
+      2-room: "room2=1"
+      3-room: "room3=1"
+      4+room: "room4=1&room5=1&room6=1"
+    prices:
+      - [10_000_000, 15_000_000]
+      - [15_000_000, 25_000_000]
+      - [25_000_000, 50_000_000]
+      - [50_000_000, null]
+    object_types: null
+
+skip_url_parts:
+  - "/sale/room/"
+  - "/sale/share/"
+
+skip_phrases:
+  - "продаётся комната"
+  - "продается комната"
+  - "продаётся доля"
+  - "продается доля"
+  - "комната в "
+  - "доля в "
+
+headless: true
+browser_pool_size: 12
+max_concurrent: 8
+listing_workers: 2
+offer_workers: 4
+retry_workers: 2
+
+# перезапуск browser context каждые N запросов для сброса fingerprint
+batch_size: 4
+batch_cooldown: [2, 4]
+listing_batch_size: 8
+
+# при WAF меняем endpoint вместо длинных пауз
+waf_endpoint_cooldown: 5
+
+max_pages: 54
+url_queue_max: 300
+max_cached_pages: 3
+min_new_first_page: 5
+
+# дробим фильтр если count > max_offers_per_filter
+max_offers_per_filter: 1400
+min_price_split: 500_000
+
+max_restarts: 50
+restart_cooldown: 1800
+max_worker_crashes: 10
+memory_threshold_mb: 4000
+
+captcha_service: null
+captcha_api_key: null
+captcha_long_pause: [15, 30]

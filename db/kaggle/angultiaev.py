@@ -1,20 +1,16 @@
-"""
-Загрузка JSON из Kaggle-датасета angultiaev/flat-sale-m24ml.
-
-Датасет ~162 ГБ (квартиры Москвы), train/{hash}/data.json + img/*.jpeg.
-Скачиваем только data.json через remotezip (Range requests), fallback - stream-unzip.
-
-python -m db.load_kaggle_angultiaev
-"""
+"""Загрузка angultiaev/flat-sale-m24ml (~162 ГБ) через remotezip."""
 
 import json
+import logging
+import os
 import re
 from pathlib import Path
 
-import psycopg2
+from db.connection import get_conn, put_conn
+from db.repository import INSERT_SQL, build_row
+from scraper.runtime import clear_checkpoint, load_checkpoint, save_checkpoint
 
-from db.loader import DB_CONFIG, INSERT_SQL, _build_row
-from scraper.utils import save_checkpoint, load_checkpoint, clear_checkpoint
+log = logging.getLogger("re")
 
 DATASET_HANDLE = "angultiaev/flat-sale-m24ml"
 DOWNLOAD_URL = (
@@ -26,53 +22,42 @@ CHECKPOINT_EVERY = 1000
 
 
 def _get_kaggle_auth() -> tuple[str, str]:
-    """Возвращает (username, key) для Kaggle API.
-    Ищет в env, ~/.kaggle/kaggle.json, или спрашивает интерактивно."""
-    import os
-
-    # env vars
     username = os.environ.get("KAGGLE_USERNAME")
     key = os.environ.get("KAGGLE_KEY")
     if username and key:
         return username, key
 
-    # kaggle.json
     kaggle_json = Path.home() / ".kaggle" / "kaggle.json"
     if kaggle_json.exists():
         with open(kaggle_json, encoding="utf-8") as f:
             creds = json.load(f)
         return creds["username"], creds["key"]
 
-    # интерактивный ввод
-    print("Kaggle API credentials не найдены.")
-    print("Получите их: kaggle.com -> Settings -> API -> Create New Token")
-    print("Или введите вручную:")
+    print("Kaggle API credentials not found.")
+    print("Get them: kaggle.com -> Settings -> API -> Create New Token")
     username = input("  Kaggle username: ").strip()
     key = input("  Kaggle API key: ").strip()
     if not username or not key:
-        raise ValueError("Credentials не могут быть пустыми")
+        raise ValueError("credentials cannot be empty")
 
-    # сохраним на будущее
     kaggle_dir = Path.home() / ".kaggle"
     kaggle_dir.mkdir(parents=True, exist_ok=True)
     kaggle_json = kaggle_dir / "kaggle.json"
     with open(kaggle_json, "w", encoding="utf-8") as f:
         json.dump({"username": username, "key": key}, f)
-    print(f"  Сохранено в {kaggle_json}")
+    log.info(f"saved to {kaggle_json}")
 
     return username, key
 
 
-def _parse_price(raw: str | None) -> int | None:
-    """'13 000 000 руб' -> 13000000"""
+def _parse_price(raw):
     if not raw:
         return None
     digits = re.sub(r"[^\d]", "", raw)
     return int(digits) if digits else None
 
 
-def _parse_area(raw: str | None) -> float | None:
-    """'28 м2' -> 28.0, '28,5 м2' -> 28.5"""
+def _parse_area(raw):
     if not raw:
         return None
     m = re.search(r"([\d]+[.,]?\d*)", raw)
@@ -81,25 +66,17 @@ def _parse_area(raw: str | None) -> float | None:
     return float(m.group(1).replace(",", "."))
 
 
-def _parse_floor(raw: str | None) -> tuple[int | None, int | None]:
-    """'4 из 8' -> (4, 8)"""
+def _parse_floor(raw):
     if not raw:
         return None, None
     m = re.search(r"(\d+)\s*из\s*(\d+)", raw)
     if m:
         return int(m.group(1)), int(m.group(2))
-    # только число - считаем этажом
     m2 = re.search(r"(\d+)", raw)
     return (int(m2.group(1)), None) if m2 else (None, None)
 
 
-def _parse_ceiling(raw: str | None) -> float | None:
-    """'2,64 м' -> 2.64"""
-    return _parse_area(raw)
-
-
-def _parse_rooms(title: str | None) -> int | None:
-    """'Продается 1-комн. квартира, 28 м2' -> 1, 'студия' -> 0"""
+def _parse_rooms(title):
     if not title:
         return None
     t = title.lower()
@@ -109,10 +86,14 @@ def _parse_rooms(title: str | None) -> int | None:
     return int(m.group(1)) if m else None
 
 
-def _parse_address(raw: str | None) -> dict:
-    """Разбирает адрес вида 'Москва, ВАО, р-н ..., ул., 21' по позициям."""
-    result = {"city": None, "region": None, "district": None,
-              "street": None, "house_number": None}
+def _parse_address(raw):
+    result = {
+        "city": None,
+        "region": None,
+        "district": None,
+        "street": None,
+        "house_number": None,
+    }
     if not raw:
         return result
 
@@ -122,21 +103,26 @@ def _parse_address(raw: str | None) -> dict:
 
     result["city"] = parts[0]
 
-    # ищем район, округ, улицу, дом по паттернам
     remaining = parts[1:]
     for part in remaining:
         if re.search(r"р-н|район", part, re.IGNORECASE):
             result["district"] = part
         elif re.match(r"^[А-ЯЁA-Z]{2,5}$", part.strip()):
             result["region"] = part
-        elif re.search(r"ул\.|улица|пер\.|переулок|просп|пр-т|ш\.|шоссе|б-р|бульвар|наб\.|набережная|пр-д|проезд", part, re.IGNORECASE):
+        elif re.search(
+            r"ул\.|улица|пер\.|переулок|просп|пр-т|ш\.|шоссе|б-р|бульвар|наб\.|набережная|пр-д|проезд",
+            part,
+            re.IGNORECASE,
+        ):
             result["street"] = part
-        elif re.match(r"^\d", part.strip()) and result["street"] and not result["house_number"]:
+        elif (
+            re.match(r"^\d", part.strip())
+            and result["street"]
+            and not result["house_number"]
+        ):
             result["house_number"] = part
 
-    # если улица не нашлась по паттерну - берем оставшиеся части
     if not result["street"] and len(remaining) >= 2:
-        # предпоследний элемент - часто улица
         for part in remaining:
             if part != result.get("region") and part != result.get("district"):
                 if not result["street"]:
@@ -147,8 +133,7 @@ def _parse_address(raw: str | None) -> dict:
     return result
 
 
-def _parse_metro(stations: list | None) -> list | None:
-    """Преобразует список станций в формат [name, minutes] для JSONB."""
+def _parse_metro(stations):
     if not stations:
         return None
     result = []
@@ -163,7 +148,7 @@ def _parse_metro(stations: list | None) -> list | None:
     return result if result else None
 
 
-def _parse_year(raw: str | None) -> int | None:
+def _parse_year(raw):
     if not raw:
         return None
     m = re.search(r"(\d{4})", str(raw))
@@ -171,7 +156,6 @@ def _parse_year(raw: str | None) -> int | None:
 
 
 def _transform(data: dict, hash_id: str) -> dict:
-    """data.json -> dict для _build_row()."""
     summary = data.get("offer_summary") or {}
     details = data.get("offer_details") or {}
 
@@ -179,13 +163,15 @@ def _transform(data: dict, hash_id: str) -> dict:
     addr = _parse_address(data.get("address"))
 
     housing_type = summary.get("Тип жилья", "")
-    is_new = True if "новостройка" in housing_type.lower() else (
-        False if housing_type else None
+    is_new = (
+        True
+        if "новостройка" in housing_type.lower()
+        else (False if housing_type else None)
     )
 
     metro = _parse_metro(data.get("nearest_stations"))
 
-    record = {
+    return {
         "url": f"kaggle_angultiaev_{hash_id}",
         "source": SOURCE_NAME,
         "price": _parse_price(data.get("price")),
@@ -207,7 +193,7 @@ def _transform(data: dict, hash_id: str) -> dict:
         "kitchen_area": _parse_area(summary.get("Площадь кухни")),
         "floor": floor,
         "total_floors": total_floors,
-        "ceiling_height": _parse_ceiling(summary.get("Высота потолков")),
+        "ceiling_height": _parse_area(summary.get("Высота потолков")),
         "renovation": summary.get("Ремонт"),
         "bathrooms": summary.get("Санузел"),
         "balcony": summary.get("Балкон/лоджия"),
@@ -224,27 +210,23 @@ def _transform(data: dict, hash_id: str) -> dict:
         "description": data.get("description"),
         "publication_date": None,
     }
-    return record
 
 
-def _extract_hash_id(zip_path: str) -> str | None:
-    """'train/train/0000c1deb1198f7b.../data.json' -> '0000c1deb1198f7b...'"""
+def _extract_hash_id(zip_path: str):
     parts = zip_path.replace("\\", "/").split("/")
-    # data.json - последний, hash_id - предпоследний
     if len(parts) >= 2 and parts[-1] == "data.json":
         return parts[-2]
     return None
 
 
 def _flush_batch(cursor, batch: list[dict]) -> tuple[int, int, int]:
-    """Вставляет батч, возвращает (inserted, duplicates, no_price)."""
     if not batch:
         return 0, 0, 0
 
     rows = []
     no_price = 0
     for record in batch:
-        row = _build_row(record)
+        row = build_row(record)
         if row.get("price") is None:
             no_price += 1
             continue
@@ -260,49 +242,47 @@ def _flush_batch(cursor, batch: list[dict]) -> tuple[int, int, int]:
             inserted += cursor.rowcount
         except Exception as e:
             cursor.connection.rollback()
-            print(f"  Ошибка вставки {row.get('url', '?')}: {e}")
+            log.error(f"insert error {row.get('url', '?')}: {e}")
 
     return inserted, len(rows) - inserted, no_price
 
 
 def _resolve_gcs_url(kaggle_url: str, auth: tuple) -> str:
-    """Kaggle API редиректит на подписанный GCS URL (временный, ~пару часов)."""
     import requests
 
-    resp = requests.get(kaggle_url, auth=auth, stream=True, timeout=60,
-                        allow_redirects=True)
+    resp = requests.get(
+        kaggle_url, auth=auth, stream=True, timeout=60, allow_redirects=True
+    )
     resp.raise_for_status()
     gcs_url = resp.url
     resp.close()
-    print(f"GCS URL получен (подпись временная)")
+    log.info("GCS URL obtained")
     return gcs_url
 
 
 def _load_via_remotezip(url: str, auth: tuple, loaded_ids: set) -> dict:
-    """Скачивает только data.json через HTTP Range requests."""
     from remotezip import RemoteZip
 
     stats = {"processed": 0, "inserted": 0, "skipped": 0, "no_price": 0, "errors": 0}
 
     gcs_url = _resolve_gcs_url(url, auth)
 
-    print("Подключаемся к архиву через remotezip...")
+    log.info("connecting via remotezip...")
     with RemoteZip(gcs_url, initial_buffer_size=10_000_000) as zf:
         all_names = zf.namelist()
-        # только train/ (в test/ нет цены)
         json_names = [
-            n for n in all_names
-            if n.endswith("/data.json") and n.startswith("train/")
+            n for n in all_names if n.endswith("/data.json") and n.startswith("train/")
         ]
         total = len(json_names)
         test_count = sum(
-            1 for n in all_names
-            if n.endswith("/data.json") and n.startswith("test/")
+            1 for n in all_names if n.endswith("/data.json") and n.startswith("test/")
         )
-        print(f"Найдено {total} train JSON + {test_count} test JSON "
-              f"(из {len(all_names)} файлов в архиве)")
+        log.info(
+            f"found {total} train JSON + {test_count} test JSON "
+            f"(of {len(all_names)} files in archive)"
+        )
 
-        conn = psycopg2.connect(**DB_CONFIG)
+        conn = get_conn()
         cursor = conn.cursor()
         batch = []
         checkpoint_ids = set(loaded_ids)
@@ -325,9 +305,8 @@ def _load_via_remotezip(url: str, auth: tuple, loaded_ids: set) -> dict:
                 except (json.JSONDecodeError, KeyError, ValueError) as e:
                     stats["errors"] += 1
                     if stats["errors"] <= 10:
-                        print(f"  Ошибка парсинга {name}: {e}")
+                        log.warning(f"parse error {name}: {e}")
 
-                # flush
                 if len(batch) >= BATCH_SIZE:
                     ins, dups, nop = _flush_batch(cursor, batch)
                     conn.commit()
@@ -336,20 +315,21 @@ def _load_via_remotezip(url: str, auth: tuple, loaded_ids: set) -> dict:
                     stats["no_price"] += nop
                     batch.clear()
 
-                # чекпоинт
                 stats["processed"] += 1
                 if stats["processed"] % CHECKPOINT_EVERY == 0:
-                    save_checkpoint("angultiaev", {
-                        "loaded_ids": list(checkpoint_ids),
-                        "stats": stats,
-                    })
-                    print(
-                        f"  [{stats['processed']}/{total}] "
-                        f"вставлено={stats['inserted']}, "
-                        f"ошибок={stats['errors']}"
+                    save_checkpoint(
+                        "angultiaev",
+                        {
+                            "loaded_ids": list(checkpoint_ids),
+                            "stats": stats,
+                        },
+                    )
+                    log.info(
+                        f"[{stats['processed']}/{total}] "
+                        f"inserted={stats['inserted']}, errors={stats['errors']}"
                     )
 
-            if batch:  # остатки
+            if batch:
                 ins, dups, nop = _flush_batch(cursor, batch)
                 conn.commit()
                 stats["inserted"] += ins
@@ -358,26 +338,24 @@ def _load_via_remotezip(url: str, auth: tuple, loaded_ids: set) -> dict:
 
         finally:
             cursor.close()
-            conn.close()
+            put_conn(conn)
 
     return stats
 
 
 def _load_via_stream(url: str, auth: tuple, loaded_ids: set) -> dict:
-    """Fallback: стримит весь ZIP, обрабатывает только data.json на лету."""
     import requests
     from stream_unzip import stream_unzip
 
     stats = {"processed": 0, "inserted": 0, "skipped": 0, "no_price": 0, "errors": 0}
 
-    print("Режим stream-unzip: стримим весь архив, фильтруем на лету...")
-    print("(Трафик ~162 ГБ, но 0 дискового пространства)")
+    log.info("stream-unzip mode: streaming full archive, filtering on the fly...")
 
     gcs_url = _resolve_gcs_url(url, auth)
     resp = requests.get(gcs_url, stream=True, timeout=60)
     resp.raise_for_status()
 
-    conn = psycopg2.connect(**DB_CONFIG)
+    conn = get_conn()
     cursor = conn.cursor()
     batch = []
     checkpoint_ids = set(loaded_ids)
@@ -389,7 +367,7 @@ def _load_via_stream(url: str, auth: tuple, loaded_ids: set) -> dict:
             name = file_name_bytes.decode("utf-8", errors="replace")
 
             if not name.endswith("/data.json") or not name.startswith("train/"):
-                for _ in chunks:  # обязаны прочитать чанки
+                for _ in chunks:
                     pass
                 continue
 
@@ -414,54 +392,56 @@ def _load_via_stream(url: str, auth: tuple, loaded_ids: set) -> dict:
             except (json.JSONDecodeError, KeyError, ValueError) as e:
                 stats["errors"] += 1
                 if stats["errors"] <= 10:
-                    print(f"  Ошибка парсинга {name}: {e}")
+                    log.warning(f"parse error {name}: {e}")
 
             if len(batch) >= BATCH_SIZE:
-                ins, skip = _flush_batch(cursor, batch)
+                ins, dups, nop = _flush_batch(cursor, batch)
                 conn.commit()
                 stats["inserted"] += ins
-                stats["skipped"] += skip
+                stats["skipped"] += dups
+                stats["no_price"] += nop
                 batch.clear()
 
-            # чекпоинт
             stats["processed"] += 1
             if stats["processed"] % CHECKPOINT_EVERY == 0:
-                save_checkpoint("angultiaev", {
-                    "loaded_ids": list(checkpoint_ids),
-                    "stats": stats,
-                })
-                print(
-                    f"  [{stats['processed']}] "
-                    f"вставлено={stats['inserted']}, "
-                    f"ошибок={stats['errors']}"
+                save_checkpoint(
+                    "angultiaev",
+                    {
+                        "loaded_ids": list(checkpoint_ids),
+                        "stats": stats,
+                    },
+                )
+                log.info(
+                    f"[{stats['processed']}] "
+                    f"inserted={stats['inserted']}, errors={stats['errors']}"
                 )
 
-        if batch:  # остатки
-            ins, skip = _flush_batch(cursor, batch)
+        if batch:
+            ins, dups, nop = _flush_batch(cursor, batch)
             conn.commit()
             stats["inserted"] += ins
-            stats["skipped"] += skip
+            stats["skipped"] += dups
+            stats["no_price"] += nop
 
     finally:
         cursor.close()
-        conn.close()
+        put_conn(conn)
         resp.close()
 
     return stats
 
 
 def _get_loaded_count() -> int:
-    """Сколько записей этого источника уже в БД."""
     try:
-        conn = psycopg2.connect(**DB_CONFIG)
-        cur = conn.cursor()
-        cur.execute(
-            "SELECT COUNT(*) FROM flats WHERE source = %s", (SOURCE_NAME,)
-        )
-        count = cur.fetchone()[0]
-        cur.close()
-        conn.close()
-        return count
+        conn = get_conn()
+        try:
+            cur = conn.cursor()
+            cur.execute("SELECT COUNT(*) FROM flats WHERE source = %s", (SOURCE_NAME,))
+            count = cur.fetchone()[0]
+            cur.close()
+            return count
+        finally:
+            put_conn(conn)
     except Exception:
         return 0
 
@@ -472,42 +452,30 @@ def main():
     username, key = _get_kaggle_auth()
     auth = (username, key)
 
-    # чекпоинт (если был обрыв)
     checkpoint = load_checkpoint("angultiaev")
     loaded_ids = set(checkpoint.get("loaded_ids", [])) if checkpoint else set()
     if existing and not loaded_ids:
-        # уже загружено ранее
-        print(f"Источник '{SOURCE_NAME}' уже в БД ({existing} записей).")
-        print("(Для перезагрузки: DELETE FROM flats WHERE source = "
-              f"'{SOURCE_NAME}')")
+        log.info(
+            f"source '{SOURCE_NAME}' already in DB ({existing} rows). "
+            f"To reload: DELETE FROM flats WHERE source = '{SOURCE_NAME}'"
+        )
         return
     if loaded_ids:
-        print(f"Продолжение загрузки: {len(loaded_ids)} в чекпоинте, "
-              f"{existing} в БД")
+        log.info(f"resuming: {len(loaded_ids)} in checkpoint, {existing} in DB")
 
-    # пробуем remotezip, fallback на stream-unzip
     try:
-        print("=" * 60)
-        print(f"Загрузка: {DATASET_HANDLE}")
-        print("Стратегия: remotezip (HTTP Range requests)")
-        print("=" * 60)
+        log.info(f"loading: {DATASET_HANDLE} (remotezip)")
         stats = _load_via_remotezip(DOWNLOAD_URL, auth, loaded_ids)
-
     except Exception as e:
-        print(f"\nremotezip не сработал: {e}")
-        print("Переключаемся на stream-unzip (fallback)...\n")
+        log.warning(f"remotezip failed: {e}, switching to stream-unzip...")
         stats = _load_via_stream(DOWNLOAD_URL, auth, loaded_ids)
 
-    # итоги
     clear_checkpoint("angultiaev")
-    print("\n" + "=" * 60)
-    print("ИТОГО:")
-    print(f"  Обработано JSON:   {stats['processed']}")
-    print(f"  Вставлено в БД:    {stats['inserted']}")
-    print(f"  Дубликатов:        {stats['skipped']}")
-    print(f"  Без цены:          {stats['no_price']}")
-    print(f"  Ошибок парсинга:   {stats['errors']}")
-    print("=" * 60)
+    log.info(
+        f"done: processed={stats['processed']} inserted={stats['inserted']} "
+        f"skipped={stats['skipped']} no_price={stats['no_price']} "
+        f"errors={stats['errors']}"
+    )
 
 
 if __name__ == "__main__":

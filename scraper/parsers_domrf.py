@@ -2,6 +2,8 @@ import re
 
 from bs4 import BeautifulSoup
 
+from scraper.parsers import _parse_float
+
 
 def parse_domrf_offer(html: str) -> dict:
     soup = BeautifulSoup(html, "html.parser")
@@ -14,16 +16,12 @@ def parse_domrf_offer(html: str) -> dict:
 
 
 def _find(soup, class_contains: str):
+    # у домрф классы с хэшами типа PriceBlock__Price-sc-1a2b3c, ищем по префиксу
     return soup.find(class_=lambda c: c and class_contains in c)
 
 
 def _find_all(soup, class_contains: str):
     return soup.find_all(class_=lambda c: c and class_contains in c)
-
-
-def _parse_float(text: str) -> float | None:
-    match = re.search(r"[\d,\.]+", text)
-    return float(match.group().replace(",", ".")) if match else None
 
 
 def _parse_price_domrf(soup: BeautifulSoup) -> dict:

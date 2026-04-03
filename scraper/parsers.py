@@ -5,6 +5,7 @@ from bs4 import BeautifulSoup
 
 
 def parse_offer_page(html: str) -> tuple[dict, list[dict]]:
+    # парсит страницу оффера cian.ru, возвращает (данные, история цен)
     soup = BeautifulSoup(html, "html.parser")
     data = {}
     data.update(_parse_price(soup))
@@ -135,6 +136,7 @@ def _parse_summary(soup: BeautifulSoup) -> dict:
         "is_apartments": None,
     }
 
+    # label в HTML -> наше поле, циан пишет то "Ремонт" то "Отделка"
     mapping = {
         "Общая площадь": "total_area",
         "Жилая площадь": "living_area",
@@ -175,7 +177,7 @@ def _parse_summary(soup: BeautifulSoup) -> dict:
     if title:
         title_text = title.get_text(strip=True)
         if "студия" in title_text.lower():
-            result["rooms"] = -1
+            result["rooms"] = -1  # студия = -1, чтобы отличать от "не указано" (None)
         else:
             match = re.search(r"(\d+)-комн", title_text)
             if match:

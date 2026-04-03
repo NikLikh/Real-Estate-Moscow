@@ -1,26 +1,30 @@
-"""
-Скрапер квартир в новостройках с наш.дом.рф
-
-Запуск:
-    python -m scraper.domrf
-"""
+"""Скрапер наш.дом.рф"""
 
 import asyncio
-import random
+import logging
 from datetime import datetime
 
-from camoufox.async_api import AsyncCamoufox
+from patchright.async_api import async_playwright
 
-from db.loader import get_cached_urls, save_rows
+from db.repository import get_cached_urls, save_rows
+from scraper.browser import (
+    AdaptiveDelay,
+    create_stealth_context,
+    handle_captcha,
+    humanize,
+    jittered_delay,
+    launch_stealth_browser,
+)
 from scraper.parsers_domrf import parse_domrf_offer
-from scraper.utils import (
+from scraper.runtime import (
     clear_checkpoint,
     install_shutdown_handler,
     is_shutting_down,
     load_checkpoint,
-    managed_page,
     save_checkpoint,
 )
+
+log = logging.getLogger("re")
 
 REGIONS = {
     "moscow": (
@@ -41,7 +45,9 @@ REGIONS = {
 
 BASE_URL = "https://xn--80az8a.xn--d1aqf.xn--p1ai"
 
-PARALLEL_WORKERS = 2
+HEADLESS = True
+NUM_CONTEXTS = 4
+PAGES_PER_CONTEXT = 6
 
 
 class DomrfScraper:
@@ -49,48 +55,40 @@ class DomrfScraper:
         self,
         regions: list[str] = None,
         max_pages: int = 3,
-        delay_range: tuple[float, float] = (8.0, 15.0),
-        headless: bool = False,
+        headless: bool = True,
     ):
         self.regions = regions or ["moscow"]
         self.max_pages = max_pages
-        self.delay_range = delay_range
         self.headless = headless
 
         self.results: list[dict] = []
         self.seen_urls: set[str] = set()
-        self.stats = {"saved": 0, "errors": 0}
+        self.stats = {"saved": 0, "errors": 0, "captchas": 0}
 
     def _load_cached_urls(self):
         self.seen_urls.update(get_cached_urls(["domrf"]))
-        print(f"Кэш: {len(self.seen_urls)} URL уже в БД")
+        log.info(f"cache: {len(self.seen_urls)} urls in DB")
 
     def _save_to_db(self, rows: list[dict]) -> int:
         return save_rows(rows)
 
     async def _wait_for_content(self, page, timeout: int = 30000):
-        """Ждем пока антибот-прелоадер пройдет и загрузится контент."""
-        await page.wait_for_timeout(3000)
-        content = await page.content()
+        await jittered_delay(2.0, 4.0)
+        await humanize(page)
 
-        if (
-            "не робот" in content
-            or "потяните" in content.lower()
-            or "403" in await page.title()
-        ):
-            print("  КАПЧА! Решите в браузере и нажмите Enter...")
-            await asyncio.to_thread(input)
-            await page.wait_for_timeout(3000)
+        if not await handle_captcha(page):
+            self.stats["captchas"] += 1
+            return False
 
         try:
             await page.wait_for_selector("text=Каталог", timeout=timeout)
         except Exception:
-            await page.wait_for_timeout(15000)
+            await jittered_delay(10.0, 15.0)
 
-        await page.wait_for_timeout(3000)
+        await jittered_delay(2.0, 4.0)
+        return True
 
     async def _get_flat_urls(self, page) -> list[str]:
-        """Собирает URL квартир со страницы листинга."""
         links = await page.query_selector_all('a[href*="/квартира/"]')
         urls = []
         for link in links:
@@ -105,37 +103,41 @@ class DomrfScraper:
         return urls
 
     async def _scrape_listing(self, page, region: str) -> list[str]:
-        """Проходит страницы листинга, собирает все URL квартир."""
         all_urls = []
 
         for page_num in range(self.max_pages):
             if is_shutting_down():
-                print(f"  [{region}] Остановка по сигналу")
+                log.info(f"  [{region}] stopping")
                 break
 
             listing_url = REGIONS[region].format(page=page_num)
-            print(f"  [{region}] Листинг {page_num + 1}: {listing_url}")
+            log.info(f"  [{region}] listing {page_num + 1}: {listing_url}")
 
             try:
                 await page.goto(listing_url, timeout=30000)
-                await self._wait_for_content(page)
+                ok = await self._wait_for_content(page)
+                if not ok:
+                    log.info(f"  [{region}] captcha on listing, skip page")
+                    continue
+
                 urls = await self._get_flat_urls(page)
 
                 if not urls:
-                    print(f"  [{region}] Нет квартир, стоп.")
+                    log.info(f"  [{region}] no flats, stop")
                     break
 
                 all_urls.extend(urls)
-                print(f"  [{region}] +{len(urls)} квартир (всего {len(all_urls)})")
+                log.info(f"  [{region}] +{len(urls)} flats (total {len(all_urls)})")
             except Exception as e:
-                print(f"  [{region}] Ошибка листинга: {e}")
+                log.error(f"  [{region}] listing error: {e}")
 
         return all_urls
 
     async def _parse_flat(self, page, url: str) -> dict | None:
-        """Грузит страницу квартиры и парсит."""
         await page.goto(url, timeout=30000)
-        await self._wait_for_content(page)
+        ok = await self._wait_for_content(page)
+        if not ok:
+            return None
 
         html = await page.content()
         data = parse_domrf_offer(html)
@@ -146,10 +148,11 @@ class DomrfScraper:
         return data
 
     async def _worker(self, name: str, queue: asyncio.Queue, context):
-        """Один воркер - одна страница браузера. Берет задачи из очереди."""
-        async with managed_page(context) as page:
-            batch = []
+        page = await context.new_page()
+        delay = AdaptiveDelay()
+        batch = []
 
+        try:
             while not queue.empty() and not is_shutting_down():
                 url = queue.get_nowait()
 
@@ -158,24 +161,31 @@ class DomrfScraper:
                     if data:
                         batch.append(data)
                         self.results.append(data)
-                        print(f"  [{name}] ok {url[-40:]}")
+                        delay.report_success()
+                        log.info(f"  [{name}] ok {url[-40:]}")
+                    else:
+                        delay.report_captcha()
                 except Exception as e:
                     self.stats["errors"] += 1
-                    print(f"  [{name}] ERR {url[-40:]} - {e}")
+                    log.error(f"  [{name}] ERR {url[-40:]} - {e}")
 
-                # flush каждые 10 шт
                 if len(batch) >= 10:
                     saved = self._save_to_db(batch)
                     self.stats["saved"] += saved
-                    print(f"  [{name}] Сохранено в БД: {saved}")
+                    log.info(f"  [{name}] saved to DB: {saved}")
                     batch.clear()
 
-                await asyncio.sleep(random.uniform(*self.delay_range))
+                await delay.wait()
 
             if batch:
                 saved = self._save_to_db(batch)
                 self.stats["saved"] += saved
-                print(f"  [{name}] Сохранено в БД (остаток): {saved}")
+                log.info(f"  [{name}] saved to DB (remainder): {saved}")
+        finally:
+            try:
+                await page.close()
+            except Exception:
+                pass
 
     async def scrape(self):
         install_shutdown_handler()
@@ -184,79 +194,95 @@ class DomrfScraper:
         checkpoint = load_checkpoint("domrf") or {"completed_regions": []}
         done_regions = set(checkpoint["completed_regions"])
 
-        async with AsyncCamoufox(
-            headless=self.headless, locale="ru-RU", humanize=True
-        ) as browser:
-            context = await browser.new_context()
-
-            # не грузим медиа/шрифты/стили - быстрее
-            BLOCKED_TYPES = {"media", "font", "stylesheet"}
-            await context.route(
-                "**/*",
-                lambda route: (
-                    route.abort()
-                    if route.request.resource_type in BLOCKED_TYPES
-                    else route.continue_()
-                ),
-            )
+        async with async_playwright() as pw:
+            browser = await launch_stealth_browser(pw, headless=self.headless)
 
             try:
                 for region in self.regions:
                     if region in done_regions:
-                        print(f"\n[{region}] Уже обработан (чекпоинт), пропускаю")
+                        log.info(f"\n[{region}] already done (checkpoint), skip")
                         continue
 
                     if is_shutting_down():
                         break
 
-                    print(f"\n{'='*50}")
-                    print(f"РЕГИОН: {region}")
-                    print(f"{'='*50}")
+                    log.info(f"\n{'='*50}")
+                    log.info(f"REGION: {region}")
 
-                    # Собираем URL квартир с листинга
-                    async with managed_page(context) as listing_page:
-                        urls = await self._scrape_listing(listing_page, region)
-                    print(f"[{region}] Собрано {len(urls)} URL квартир")
+                    context = await create_stealth_context(browser)
+                    page = await context.new_page()
+                    try:
+                        urls = await self._scrape_listing(page, region)
+                    finally:
+                        await page.close()
+                        await context.close()
+
+                    log.info(f"[{region}] collected {len(urls)} flat URLs")
 
                     if not urls:
                         continue
 
-                    # раздаем URL воркерам
                     queue = asyncio.Queue()
                     for url in urls:
                         queue.put_nowait(url)
 
-                    workers = [
-                        asyncio.create_task(self._worker(f"W{i+1}", queue, context))
-                        for i in range(PARALLEL_WORKERS)
-                    ]
-                    await asyncio.gather(*workers)
+                    total = NUM_CONTEXTS * PAGES_PER_CONTEXT
+                    log.info(
+                        f"[{region}] launching: {NUM_CONTEXTS} contexts "
+                        f"x {PAGES_PER_CONTEXT} pages = {total} workers"
+                    )
 
-                    # регион обработан
+                    groups = []
+                    for ctx_id in range(NUM_CONTEXTS):
+                        ctx = await create_stealth_context(browser)
+                        workers = [
+                            asyncio.create_task(
+                                self._worker(
+                                    f"C{ctx_id+1}-W{j+1}", queue, ctx
+                                )
+                            )
+                            for j in range(PAGES_PER_CONTEXT)
+                        ]
+                        groups.append((ctx, workers))
+
+                    all_workers = [w for _, ws in groups for w in ws]
+                    await asyncio.gather(*all_workers)
+
+                    for ctx, _ in groups:
+                        try:
+                            await ctx.close()
+                        except Exception:
+                            pass
+
                     done_regions.add(region)
                     save_checkpoint("domrf", {"completed_regions": list(done_regions)})
-                    print(f"[{region}] Готово. Всего записей: {len(self.results)}")
+                    log.info(f"[{region}] done. total records: {len(self.results)}")
 
             finally:
-                await context.close()
+                await browser.close()
 
-        # все ок - чекпоинт больше не нужен
         if not is_shutting_down():
             clear_checkpoint("domrf")
 
         self._print_stats()
 
     def _print_stats(self):
-        print(f"\n{'='*50}")
-        print(f"ИТОГО:")
-        print(f"  Спарсено: {len(self.results)}")
-        print(f"  Сохранено в БД: {self.stats['saved']}")
-        print(f"  Ошибок: {self.stats['errors']}")
+        log.info(f"\n{'='*50}")
+        log.info(f"TOTAL:")
+        log.info(f"  parsed: {len(self.results)}")
+        log.info(f"  saved to DB: {self.stats['saved']}")
+        log.info(f"  errors: {self.stats['errors']}")
+        log.info(f"  captchas: {self.stats['captchas']}")
         if is_shutting_down():
-            print("Остановлено по сигналу. При перезапуске продолжит с чекпоинта.")
-        print(f"{'='*50}")
+            log.info("stopped by signal. will resume from checkpoint.")
+
+
+def main():
+    scraper = DomrfScraper(
+        regions=["moscow", "mo"], max_pages=100, headless=HEADLESS
+    )
+    asyncio.run(scraper.scrape())
 
 
 if __name__ == "__main__":
-    scraper = DomrfScraper(regions=["moscow", "mo"], max_pages=100)
-    asyncio.run(scraper.scrape())
+    main()

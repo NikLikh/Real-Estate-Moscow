@@ -1,8 +1,8 @@
+import logging
 import traceback
 from pathlib import Path
 
 import kagglehub
-import psycopg2
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import (
     col,
@@ -13,15 +13,11 @@ from pyspark.sql.functions import (
     when,
 )
 
-from db.loader import DB_CONFIG, INSERT_SQL, _build_row
+from config.settings import JARS_PATH, JDBC_PROPS, JDBC_URL
+from db.connection import get_conn, put_conn
+from db.repository import INSERT_SQL, build_row
 
-JDBC_URL = "jdbc:postgresql://localhost:5432/real_estate"
-JDBC_PROPS = {"user": "user", "password": "password", "driver": "org.postgresql.Driver"}
-JARS_PATH = str(
-    Path(
-        "C:/Users/Nikita/Study/Master/Data_Science/DA_real_estate/jars/postgresql-42.7.4.jar"
-    )
-)
+log = logging.getLogger("re")
 
 SCHEMA = {
     "url": "string",
@@ -65,7 +61,6 @@ SCHEMA = {
 FINAL_COLUMNS = list(SCHEMA.keys())
 
 BUILDING_TYPE_MAP = {
-    0: "Другое",
     1: "Панельный",
     2: "Монолитный",
     3: "Кирпичный",
@@ -88,13 +83,13 @@ def _create_spark():
         .config("spark.jars", JARS_PATH)
         .config("spark.driver.extraClassPath", JARS_PATH)
         .config("spark.executor.extraClassPath", JARS_PATH)
-        .config("spark.driver.memory", "1g")
+        .config("spark.driver.memory", "4g")
         .getOrCreate()
     )
 
 
 def _align_columns(df):
-    """Добавляет недостающие колонки и кастует типы."""
+    # приводим к единой схеме, недостающие колонки заполняем NULL
     for col_name, col_type in SCHEMA.items():
         if col_name not in df.columns:
             df = df.withColumn(col_name, lit(None).cast(col_type))
@@ -105,17 +100,18 @@ def _align_columns(df):
 
 def _write_to_pg(df, label):
     df = df.dropDuplicates(["url", "source", "price"])
-    print(f"[{label}] Записываем в PG...")
+    log.info(f"[{label}] writing to PG...")
     (
         df.write.mode("append")
         .option("batchsize", 5000)
         .option("numPartitions", 2)
         .jdbc(JDBC_URL, "flats", properties=JDBC_PROPS)
     )
-    print(f"[{label}] Готово")
+    log.info(f"[{label}] done")
 
 
 def _transform_mrdaniilak(df):
+    # нестандартная нумерация: 81 = Москва, 3 = МО (подтверждено координатами)
     return _align_columns(
         df.filter(col("region").isin(81, 3))
         .withColumn(
@@ -128,6 +124,10 @@ def _transform_mrdaniilak(df):
         .withColumnRenamed("level", "floor")
         .withColumnRenamed("levels", "total_floors")
         .withColumnRenamed("area", "total_area")
+        .filter(col("lat").between(54.2, 57.0) & col("lon").between(35.0, 40.5))
+        .filter(col("price") > 0)
+        .filter(col("total_area").isNull() | col("total_area").between(5, 500))
+        .withColumn("rooms", when(col("rooms") < 0, None).otherwise(col("rooms")))
         .withColumn(
             "is_new_building", when(col("object_type") == 2, True).otherwise(False)
         )
@@ -150,6 +150,7 @@ def _transform_egorkainov(df):
         "European-style renovation": "Евроремонт",
         "Without renovation": "Без ремонта",
         "Designer renovation": "Дизайнерский",
+        "Designer": "Дизайнерский",
     }
     reno_expr = col("Renovation")
     for eng, rus in renovation_map.items():
@@ -204,17 +205,22 @@ def _transform_ivan314sh(df):
 
 
 def _transform_mrdaniilak_2021(df):
+    # стандартные коды ФИАС: 77 = Москва, 50 = МО
     return _align_columns(
-        df.filter(col("id_region").isin(3, 81))
+        df.filter(col("id_region").isin(77, 50))
         .withColumn(
             "city",
-            when(col("id_region") == 81, "Москва").otherwise("Московская область"),
+            when(col("id_region") == 77, "Москва").otherwise("Московская область"),
         )
         .withColumnRenamed("geo_lat", "lat")
         .withColumnRenamed("geo_lon", "lon")
         .withColumnRenamed("level", "floor")
         .withColumnRenamed("levels", "total_floors")
         .withColumnRenamed("area", "total_area")
+        .filter(col("lat").between(54.2, 57.0) & col("lon").between(35.0, 40.5))
+        .filter(col("price") > 0)
+        .filter(col("total_area").isNull() | col("total_area").between(5, 500))
+        .withColumn("rooms", when(col("rooms") < 0, None).otherwise(col("rooms")))
         .withColumn("building_type", _building_type_expr())
         .withColumn(
             "is_new_building", when(col("object_type") == 2, True).otherwise(False)
@@ -237,9 +243,21 @@ def _transform_romanbaster(df):
     floors_str = regexp_extract(col("level"), r"/(\d+)", 1)
     return _align_columns(
         df.filter(col("city") == "Москва")
+        .filter(col("price") > 0)
         .withColumn("floor", when(floor_str != "", floor_str.cast("short")))
         .withColumn("total_floors", when(floors_str != "", floors_str.cast("short")))
+        .withColumnRenamed("area", "total_area")
         .withColumnRenamed("material", "building_type")
+        .withColumn(
+            "building_type",
+            when(col("building_type") == "0", None)
+            .when(col("building_type") == "Монолит", "Монолитный")
+            .when(col("building_type") == "Панель", "Панельный")
+            .when(col("building_type") == "Кирпич", "Кирпичный")
+            .when(col("building_type") == "Блоки", "Блочный")
+            .when(col("building_type") == "Дерево", "Деревянный")
+            .otherwise(col("building_type")),
+        )
         .withColumnRenamed("price_by_meter", "price_per_m2")
         .withColumnRenamed("longitude", "lon")
         .withColumnRenamed("latitude", "lat")
@@ -268,6 +286,8 @@ def _transform_romanbaster(df):
 
 
 def _transform_hishamhaydar(df):
+    # у этого xlsx дублируются имена колонок, spark молча их схлопывает, поэтому
+    # переименовываем с префиксом-индексом и берем нужные по позиции
     old_cols = df.columns
     unique_names = [f"c{i}_{c}" for i, c in enumerate(old_cols)]
     df = df.toDF(*unique_names)
@@ -353,11 +373,11 @@ DATASETS = {
 
 
 def _load_xlsx_via_pandas(path, config):
-    """XLSX через pandas -> psycopg2 (Spark жрет слишком много памяти)."""
+    """xlsx через pandas -> psycopg2 (Spark жрет слишком много памяти на xlsx)"""
     import pandas as pd
 
     df = pd.read_excel(path, sheet_name=config["xlsx_sheet"])
-    print(f"[{config['label']}] Строк: {len(df)}")
+    log.info(f"[{config['label']}] rows: {len(df)}")
 
     df = df.rename(
         columns={
@@ -378,49 +398,52 @@ def _load_xlsx_via_pandas(path, config):
     df["url"] = "kaggle_hishamhaydar_" + df.index.astype(str)
     df["price"] = df["price"].astype("Int64")
 
-    conn = psycopg2.connect(**DB_CONFIG)
-    cur = conn.cursor()
-    ok, inv = 0, 0
-    for _, r in df.iterrows():
-        row = _build_row(r.to_dict())
-        if not row.get("price"):
-            inv += 1
-            continue
-        try:
-            cur.execute(INSERT_SQL, row)
-            ok += cur.rowcount
-        except Exception:
-            conn.rollback()
-    conn.commit()
-    cur.close()
-    conn.close()
-    print(f"[{config['label']}] Загружено {ok}, невалидных {inv}")
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        ok, inv = 0, 0
+        for _, r in df.iterrows():
+            row = build_row(r.to_dict())
+            if not row.get("price"):
+                inv += 1
+                continue
+            try:
+                cur.execute(INSERT_SQL, row)
+                ok += cur.rowcount
+            except Exception:
+                conn.rollback()
+        conn.commit()
+        cur.close()
+        log.info(f"[{config['label']}] loaded {ok}, invalid {inv}")
+    finally:
+        put_conn(conn)
 
 
 def _get_loaded_sources():
-    conn = psycopg2.connect(**DB_CONFIG)
-    cursor = conn.cursor()
-    cursor.execute("SELECT DISTINCT source FROM flats WHERE source LIKE 'kaggle_%'")
-    sources = {row[0] for row in cursor.fetchall()}
-    cursor.close()
-    conn.close()
-    return sources
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT DISTINCT source FROM flats WHERE source LIKE 'kaggle_%'")
+        sources = {row[0] for row in cur.fetchall()}
+        cur.close()
+        return sources
+    finally:
+        put_conn(conn)
 
 
 def main():
     spark = _create_spark()
     loaded = _get_loaded_sources()
-    print(f"Уже загружены: {loaded or 'ничего'}")
+    log.info(f"already loaded: {loaded or 'nothing'}")
 
     for dataset_id, config in DATASETS.items():
         source_name = config.get("source_check", f"kaggle_{dataset_id.split('/')[0]}")
         if source_name in loaded:
-            print(f"\n[{config['label']}] уже в БД, пропуск")
+            log.info(f"[{config['label']}] already in DB, skip")
             continue
 
-        print(f"\n{'='*50}")
-        print(f"{config['label']}")
-        print(f"{'='*50}")
+        log.info(f"{'='*50}")
+        log.info(config["label"])
 
         try:
             path = kagglehub.dataset_download(dataset_id)
@@ -429,7 +452,7 @@ def main():
                 candidates = list(Path(path).rglob("*.csv"))
                 csv_path = candidates[0] if candidates else None
             if not csv_path:
-                print("CSV не найден")
+                log.warning("CSV not found")
                 continue
 
             if "xlsx_sheet" in config:
@@ -443,7 +466,7 @@ def main():
                 _write_to_pg(df, config["label"])
 
         except Exception as e:
-            print(f"Ошибка: {e}")
+            log.error(f"error: {e}")
             traceback.print_exc()
 
     spark.stop()
