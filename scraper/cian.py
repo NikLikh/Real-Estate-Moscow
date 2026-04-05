@@ -46,6 +46,7 @@ from scraper.runtime import (
 
 log = logging.getLogger("re")
 
+
 def _format_slot_plan(names, registry):
     if not names:
         return "-"
@@ -75,8 +76,21 @@ async def supervised(name, coro_factory, max_crashes):
 
 
 async def crawl_listings(
-    name, browser, filters, url_queue, seen, sem, completed, delay, stats, cfg,
-    orchestrator=None, stagger=0, endpoint_name=None, pw=None, shared=False,
+    name,
+    browser,
+    filters,
+    url_queue,
+    seen,
+    sem,
+    completed,
+    delay,
+    stats,
+    cfg,
+    orchestrator=None,
+    stagger=0,
+    endpoint_name=None,
+    pw=None,
+    shared=False,
 ):
     # ходит по листингам и собирает url-ы офферов в очередь
     max_pages = cfg.get("max_pages", 54)
@@ -92,7 +106,13 @@ async def crawl_listings(
         await asyncio.sleep(stagger)
 
     s = EndpointSession(
-        name, "listing", browser, orchestrator, prefer_name=endpoint_name, pw=pw, cfg=cfg,
+        name,
+        "listing",
+        browser,
+        orchestrator,
+        prefer_name=endpoint_name,
+        pw=pw,
+        cfg=cfg,
         shared=shared,
     )
     await s.open()
@@ -160,16 +180,18 @@ async def crawl_listings(
                         if ok:
                             result, _ = await s.goto(url, sem)
                             recovered = (
-                                result and
-                                not await detect_waf_rate_limit(s.page) and
-                                not await detect_captcha(s.page, url_only=True)
+                                result
+                                and not await detect_waf_rate_limit(s.page)
+                                and not await detect_captcha(s.page, url_only=True)
                             )
                     if recovered:
                         consecutive_waf = 0
                         await s.report_waf_resolved()
                     else:
                         consecutive_waf += 1
-                        log.warning(f"[{name}] WAF #{consecutive_waf} on {s.ep['name']}")
+                        log.warning(
+                            f"[{name}] WAF #{consecutive_waf} on {s.ep['name']}"
+                        )
                         if consecutive_waf >= 6:
                             request_restart(f"WAF x{consecutive_waf}")
                             break
@@ -213,7 +235,9 @@ async def crawl_listings(
                         continue
                     try:
                         title = await s.page.title()
-                        log.info(f"[{name}] no cards on p.{pg}, title='{title[:60]}', end of filter")
+                        log.info(
+                            f"[{name}] no cards on p.{pg}, title='{title[:60]}', end of filter"
+                        )
                     except Exception:
                         log.info(f"[{name}] no cards on p.{pg}, end of filter")
                     filter_ok = True
@@ -294,7 +318,17 @@ async def crawl_listings(
         await s.close()
 
 
-async def _parse_and_save(name, page, url, row_queue, stats, t_start=None, goto_dt=0, check_dt=0, max_retries=5):
+async def _parse_and_save(
+    name,
+    page,
+    url,
+    row_queue,
+    stats,
+    t_start=None,
+    goto_dt=0,
+    check_dt=0,
+    max_retries=5,
+):
     for attempt in range(max_retries):
         try:
             await page.wait_for_selector('[data-testid="price-amount"]', timeout=4000)
@@ -361,8 +395,19 @@ async def _parse_and_save(name, page, url, row_queue, stats, t_start=None, goto_
 
 
 async def parse_offers(
-    name, browser, url_queue, retry_queue, row_queue, sem, delay, stats, cfg,
-    orchestrator=None, stagger=0, endpoint_name=None, pw=None,
+    name,
+    browser,
+    url_queue,
+    retry_queue,
+    row_queue,
+    sem,
+    delay,
+    stats,
+    cfg,
+    orchestrator=None,
+    stagger=0,
+    endpoint_name=None,
+    pw=None,
 ):
     if stagger:
         await asyncio.sleep(stagger)
@@ -421,9 +466,9 @@ async def parse_offers(
                     if ok:
                         result, goto_dt = await s.goto(url, sem)
                         recovered = (
-                            result and
-                            not await detect_waf_rate_limit(s.page) and
-                            not await detect_captcha(s.page, url_only=True)
+                            result
+                            and not await detect_waf_rate_limit(s.page)
+                            and not await detect_captcha(s.page, url_only=True)
                         )
                 if recovered:
                     consecutive_waf = 0
@@ -486,8 +531,19 @@ async def parse_offers(
 
 
 async def retry_offers(
-    name, browser, retry_queue, url_queue, row_queue, sem, delay, stats,
-    orchestrator=None, stagger=0, cfg=None, endpoint_name=None, pw=None,
+    name,
+    browser,
+    retry_queue,
+    url_queue,
+    row_queue,
+    sem,
+    delay,
+    stats,
+    orchestrator=None,
+    stagger=0,
+    cfg=None,
+    endpoint_name=None,
+    pw=None,
 ):
     if stagger:
         await asyncio.sleep(stagger)
@@ -558,9 +614,9 @@ async def retry_offers(
                     if ok:
                         result, goto_dt = await s.goto(url, sem)
                         recovered = (
-                            result and
-                            not await detect_waf_rate_limit(s.page) and
-                            not await detect_captcha(s.page, url_only=True)
+                            result
+                            and not await detect_waf_rate_limit(s.page)
+                            and not await detect_captcha(s.page, url_only=True)
                         )
                 if recovered:
                     consecutive_waf = 0
@@ -681,7 +737,9 @@ async def memory_watchdog(threshold_mb):
         await asyncio.sleep(30)
 
 
-def _build_runtime_checkpoint(completed, url_queue, retry_queue, session_plan, registry):
+def _build_runtime_checkpoint(
+    completed, url_queue, retry_queue, session_plan, registry
+):
     return {
         "completed_filters": list(completed),
         "pending_urls": queue_snapshot(url_queue),
@@ -706,11 +764,15 @@ async def _restore_runtime_queues(checkpoint, url_queue, retry_queue, seen):
     return len(pending), len(retry)
 
 
-async def checkpoint_runtime_periodically(completed, url_queue, retry_queue, session_plan, registry, interval=30):
+async def checkpoint_runtime_periodically(
+    completed, url_queue, retry_queue, session_plan, registry, interval=30
+):
     while not should_stop():
         save_checkpoint(
             "cian",
-            _build_runtime_checkpoint(completed, url_queue, retry_queue, session_plan, registry),
+            _build_runtime_checkpoint(
+                completed, url_queue, retry_queue, session_plan, registry
+            ),
         )
         await asyncio.sleep(interval)
 
@@ -737,8 +799,18 @@ async def print_stats_periodically(stats, t0, registry=None, interval=300):
 
 
 async def _run_serial_offer_retry(
-    browser_pool, endpoint_name, pw, url_queue, retry_queue, row_queue, sem,
-    delay, stats, cfg, orchestrator, max_crashes,
+    browser_pool,
+    endpoint_name,
+    pw,
+    url_queue,
+    retry_queue,
+    row_queue,
+    sem,
+    delay,
+    stats,
+    cfg,
+    orchestrator,
+    max_crashes,
 ):
     while queue_snapshot(url_queue) or queue_snapshot(retry_queue):
         if queue_snapshot(url_queue):
@@ -820,7 +892,10 @@ async def _run_session(all_filters, seen, stats, cfg, t0):
         log.info(f"[HTTP] pool ready: {http_pool.alive} slots, {n_http} workers")
 
     session_plan = build_runtime_session_plan(
-        cfg, len(remaining), registry.snapshots(), http_offers=use_http,
+        cfg,
+        len(remaining),
+        registry.snapshots(),
+        http_offers=use_http,
     )
     planner_workers = session_plan.planner_workers
     max_concurrent = session_plan.max_concurrent
@@ -829,7 +904,10 @@ async def _run_session(all_filters, seen, stats, cfg, t0):
     elif session_plan.serial_offer_phase:
         queue_max = 0
     else:
-        queue_max = max(cfg.get("url_queue_max", 300), len(restored_pending) + len(restored_retry) + 50)
+        queue_max = max(
+            cfg.get("url_queue_max", 300),
+            len(restored_pending) + len(restored_retry) + 50,
+        )
     max_crashes = cfg.get("max_worker_crashes", 5)
     mem_threshold = cfg.get("memory_threshold_mb", 2500)
     listing_slots = session_plan.listing_slots
@@ -846,7 +924,9 @@ async def _run_session(all_filters, seen, stats, cfg, t0):
     retry_queue = asyncio.Queue()
     row_queue = asyncio.Queue()
     delay = AdaptiveDelay()
-    restored_counts = await _restore_runtime_queues(checkpoint, url_queue, retry_queue, seen)
+    restored_counts = await _restore_runtime_queues(
+        checkpoint, url_queue, retry_queue, seen
+    )
 
     runtime_desc = ", ".join(
         f"{ep['name']}[{ep['slot_class']}:{ep.get('network_id', ep.get('ip', '-'))}]"
@@ -884,13 +964,17 @@ async def _run_session(all_filters, seen, stats, cfg, t0):
                 if use_http:
                     filters = await http_plan_filters(http_pool, cfg)
                 else:
-                    filters = await plan_filters(browser_pool, sem, cfg, orchestrator=orchestrator, pw=pw)
+                    filters = await plan_filters(
+                        browser_pool, sem, cfg, orchestrator=orchestrator, pw=pw
+                    )
                 filters = [f for f in filters if f["label"] not in done_labels]
                 log.info(f"after plan: {len(filters)} filters to crawl")
 
             writer_task = asyncio.create_task(flush_rows(row_queue, stats))
             watchdog_task = asyncio.create_task(memory_watchdog(mem_threshold))
-            stats_task = asyncio.create_task(print_stats_periodically(stats, t0, registry=registry))
+            stats_task = asyncio.create_task(
+                print_stats_periodically(stats, t0, registry=registry)
+            )
             checkpoint_task = asyncio.create_task(
                 checkpoint_runtime_periodically(
                     completed,
@@ -907,26 +991,42 @@ async def _run_session(all_filters, seen, stats, cfg, t0):
                 n_listing = cfg.get("http_listing_workers", 8)
                 http_task = asyncio.create_task(
                     run_http_workers(
-                        n_http, url_queue, retry_queue, row_queue,
-                        http_pool, stats, cfg, cookies=http_cookies,
+                        n_http,
+                        url_queue,
+                        retry_queue,
+                        row_queue,
+                        http_pool,
+                        stats,
+                        cfg,
+                        cookies=http_cookies,
                     )
                 )
                 await run_http_listings(
-                    n_listing, filters, url_queue, seen, completed,
-                    http_pool, stats, cfg,
+                    n_listing,
+                    filters,
+                    url_queue,
+                    seen,
+                    completed,
+                    http_pool,
+                    stats,
+                    cfg,
                 )
                 for _ in range(n_http):
                     await url_queue.put(None)
                 await http_task
 
             elif not use_http and filters and listing_slots:
-                filter_chunks = [filters[i::len(listing_slots)] for i in range(len(listing_slots))]
+                filter_chunks = [
+                    filters[i :: len(listing_slots)] for i in range(len(listing_slots))
+                ]
                 listing_stagger = cfg.get("listing_stagger", 3.0)
                 listing_tasks = [
                     asyncio.create_task(
                         supervised(
                             f"L{i+1}",
-                            lambda i=i, b=browser_pool.get(), chunk=filter_chunks[i], endpoint_name=listing_slots[i], pw=pw: crawl_listings(
+                            lambda i=i, b=browser_pool.get(), chunk=filter_chunks[
+                                i
+                            ], endpoint_name=listing_slots[i], pw=pw: crawl_listings(
                                 f"L{i+1}",
                                 b,
                                 chunk,
@@ -965,8 +1065,13 @@ async def _run_session(all_filters, seen, stats, cfg, t0):
                     retry_http = asyncio.create_task(
                         run_http_workers(
                             min(n_http, len(retry_snapshot)),
-                            retry_as_url, asyncio.Queue(), row_queue,
-                            http_pool, stats, cfg, cookies=http_cookies,
+                            retry_as_url,
+                            asyncio.Queue(),
+                            row_queue,
+                            http_pool,
+                            stats,
+                            cfg,
+                            cookies=http_cookies,
                         )
                     )
                     for _ in range(min(n_http, len(retry_snapshot))):
@@ -977,8 +1082,13 @@ async def _run_session(all_filters, seen, stats, cfg, t0):
                 if listing_tasks:
                     await asyncio.gather(*listing_tasks)
                 endpoint_name = (
-                    offer_slots[0] if offer_slots else
-                    (listing_slots[0] if listing_slots else registry.healthy_endpoints()[0]["name"])
+                    offer_slots[0]
+                    if offer_slots
+                    else (
+                        listing_slots[0]
+                        if listing_slots
+                        else registry.healthy_endpoints()[0]["name"]
+                    )
                 )
                 await _run_serial_offer_retry(
                     browser_pool,
@@ -1000,7 +1110,9 @@ async def _run_session(all_filters, seen, stats, cfg, t0):
                     asyncio.create_task(
                         supervised(
                             f"P{i+1}",
-                            lambda i=i, b=browser_pool.get(), endpoint_name=offer_slots[i], pw=pw: parse_offers(
+                            lambda i=i, b=browser_pool.get(), endpoint_name=offer_slots[
+                                i
+                            ], pw=pw: parse_offers(
                                 f"P{i+1}",
                                 b,
                                 url_queue,
@@ -1025,7 +1137,9 @@ async def _run_session(all_filters, seen, stats, cfg, t0):
                     asyncio.create_task(
                         supervised(
                             f"R{i+1}",
-                            lambda i=i, b=browser_pool.get(), endpoint_name=retry_slots[i], pw=pw: retry_offers(
+                            lambda i=i, b=browser_pool.get(), endpoint_name=retry_slots[
+                                i
+                            ], pw=pw: retry_offers(
                                 f"R{i+1}",
                                 b,
                                 retry_queue,
@@ -1076,7 +1190,9 @@ async def _run_session(all_filters, seen, stats, cfg, t0):
 
             save_checkpoint(
                 "cian",
-                _build_runtime_checkpoint(completed, url_queue, retry_queue, session_plan, registry),
+                _build_runtime_checkpoint(
+                    completed, url_queue, retry_queue, session_plan, registry
+                ),
             )
             await row_queue.put(None)
             await writer_task
@@ -1106,7 +1222,14 @@ async def main():
     log.info(f"cache: {len(seen)} urls")
 
     all_filters = build_filters_from_config(cfg)
-    stats = {"parsed": 0, "captchas": 0, "skipped": 0, "saved": 0, "network_errors": 0, "waf_blocks": 0}
+    stats = {
+        "parsed": 0,
+        "captchas": 0,
+        "skipped": 0,
+        "saved": 0,
+        "network_errors": 0,
+        "waf_blocks": 0,
+    }
 
     max_restarts = cfg.get("max_restarts", 5)
     cooldown = cfg.get("restart_cooldown", 60)
@@ -1116,7 +1239,9 @@ async def main():
             break
 
         if attempt > 0:
-            log.info(f"\n=== RESTART {attempt}/{max_restarts}, cooldown {cooldown}s ===")
+            log.info(
+                f"\n=== RESTART {attempt}/{max_restarts}, cooldown {cooldown}s ==="
+            )
             reset_restart()
             await jittered_delay(cooldown * 0.8, cooldown * 1.2)
             seen = get_cached_urls(["cian", "cian_history"])

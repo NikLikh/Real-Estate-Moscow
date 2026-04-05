@@ -196,7 +196,9 @@ async def plan_filters(browser_pool, sem, cfg=None, orchestrator=None, pw=None):
                 filt = queue.get_nowait()
             except asyncio.QueueEmpty:
                 break
-            sub = await _maybe_split(session, sem, filt, max_offers, min_split, cfg, queue)
+            sub = await _maybe_split(
+                session, sem, filt, max_offers, min_split, cfg, queue
+            )
             async with lock:
                 result.extend(sub)
 
@@ -286,7 +288,9 @@ async def _http_check_count(pool, url, cfg):
         return None
 
     try:
-        async with AsyncSession(impersonate="chrome", proxy=slot.proxy, max_clients=5) as s:
+        async with AsyncSession(
+            impersonate="chrome", proxy=slot.proxy, max_clients=5
+        ) as s:
             resp = await s.get(f"{url}&p=1", headers=_headers(), timeout=15)
     except Exception:
         return None
@@ -386,7 +390,9 @@ async def _dry_run():
     async with async_playwright() as pw:
         pool = await launch_browser_pool(pw, 4, headless=True)
         try:
-            filters = await plan_filters(pool, sem, cfg, orchestrator=orchestrator, pw=pw)
+            filters = await plan_filters(
+                pool, sem, cfg, orchestrator=orchestrator, pw=pw
+            )
             log.info(f"total: {len(filters)} filters")
             for f in filters[:10]:
                 log.info(f"  {f['label']}")

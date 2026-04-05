@@ -244,7 +244,9 @@ async def get_available_countries(bg, ext_name):
         return []
 
 
-async def launch_vpn_context(pw, ext_name, server_id, identity=None, headless=False, cfg_path=None):
+async def launch_vpn_context(
+    pw, ext_name, server_id, identity=None, headless=False, cfg_path=None
+):
     """запускает persistent context с VPN-расширением, подключает к серверу.
     возвращает (context, bg_page) или райзит если расширение не загрузилось."""
     identity = identity or SessionIdentity()
@@ -291,7 +293,9 @@ async def launch_vpn_context(pw, ext_name, server_id, identity=None, headless=Fa
     # ждем background page (MV2) или service worker (MV3)
     bg = await _find_ext_worker(ctx, ext_name)
     if not bg:
-        log.warning(f"[VPN] {ext_name}: background page not found, extension may not work")
+        log.warning(
+            f"[VPN] {ext_name}: background page not found, extension may not work"
+        )
         return ctx, None
 
     if not ext_cfg.get("connect_js"):
@@ -367,7 +371,9 @@ async def discover_vpn_servers(pw, ext_name, cfg_path=None):
         if bg:
             await _wait_for_pac(bg, ext_name, timeout=15)
             countries = await get_available_countries(bg, ext_name)
-            log.info(f"[VPN] {ext_name}: {len(countries)} countries available: {countries}")
+            log.info(
+                f"[VPN] {ext_name}: {len(countries)} countries available: {countries}"
+            )
 
         return countries
     except Exception as e:

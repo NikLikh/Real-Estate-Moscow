@@ -14,6 +14,6 @@ data
 .tor_data
 extensions/*/
 !extensions/.gitkeep
-tools
-tests
+tools/
+tests/
 extensions

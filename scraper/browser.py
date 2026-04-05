@@ -115,8 +115,7 @@ BLOCKED_PATTERNS = [
 ]
 
 # для offer-страниц: JS, CSS, SVG, картинки
-# JS не нужен т.к. все данные в SSR (data-testid, data-name, inline <script>)
-# goto 0.5-1с вместо 20-115с
+# JS не нужен т.к. все данные в SSR
 OFFER_EXTRA_BLOCKED = [
     "**/*.js",
     "**/*.css",
@@ -133,10 +132,9 @@ CHROMIUM_ARGS = [
     "--no-first-run",
     "--no-default-browser-check",
     "--disable-component-extensions-with-background-pages",
-    "--blink-settings=imagesEnabled=false",  # дублирует BLOCKED_PATTERNS, но срезает до сети
-    "--disable-http2",  # HTTP/2 keep-alive вызывает ERR_HTTP2_PING_FAILED
-    "--no-proxy-server",  # игнорировать системный прокси (Happ/v2ray ставит system proxy)
-    # экономия RAM и CPU -- не нужны для парсинга
+    "--blink-settings=imagesEnabled=false",
+    "--disable-http2",
+    "--no-proxy-server",
     "--disable-gpu",
     "--disable-dev-shm-usage",
     "--disable-software-rasterizer",
@@ -154,8 +152,7 @@ CHROMIUM_ARGS = [
     "--mute-audio",
 ]
 
-# для VPN-расширений: без --disable-component-extensions (убивает background page расширения)
-# и без --no-proxy-server (расширение маршрутизирует через chrome.proxy API)
+# убираем компоненты vpn-расширений
 CHROMIUM_ARGS_VPN = [
     a
     for a in CHROMIUM_ARGS
@@ -484,7 +481,7 @@ VPN_SIGNS = [
     "vpn detected",
 ]
 
-# WAF rate limit отдельно от VPN-блока, при нём нужна ротация endpoint
+# ставим WAF rate limit отдельно от VPN-блока, при нём нужна ротация endpoint
 WAF_RATE_LIMIT_SIGNS = [
     "cian_waf_block",
     "cian_waf_rate_limit",

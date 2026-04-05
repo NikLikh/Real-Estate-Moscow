@@ -40,12 +40,20 @@ LISTING_PATH = (
 
 # offer pages: CSS/images/fonts не нужны, JS оставляем для SP challenge
 OFFER_BLOCK_EXTRA = [
-    "**/*.css", "**/*.svg", "**/*.jpg", "**/*.jpeg",
-    "**/*.png", "**/*.webp", "**/*.gif", "**/*.woff2", "**/*.woff",
+    "**/*.css",
+    "**/*.svg",
+    "**/*.jpg",
+    "**/*.jpeg",
+    "**/*.png",
+    "**/*.webp",
+    "**/*.gif",
+    "**/*.woff2",
+    "**/*.woff",
 ]
 
 _NEXT_DATA_RE = re.compile(
-    r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>', re.DOTALL,
+    r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>',
+    re.DOTALL,
 )
 
 
@@ -76,9 +84,13 @@ class ProxyPool:
 def _discover_cyberghost_proxies():
     # статический server_list.json внутри CRX -> HTTPS proxies
     from pathlib import Path
+
     server_list = (
         Path(__file__).resolve().parent.parent
-        / "extensions" / "cyberghost" / "assets" / "server_list.json"
+        / "extensions"
+        / "cyberghost"
+        / "assets"
+        / "server_list.json"
     )
     if not server_list.exists():
         return []
@@ -119,10 +131,13 @@ def build_listing_urls(cfg):
     base = dc.get("base_url", BASE_URL)
     path = dc.get("listing_path", LISTING_PATH)
     flat_status = dc.get("flat_status", "free,booked")
-    regions = dc.get("regions", {
-        "moscow": {"place": "0-1", "max_pages": 500},
-        "mo": {"place": "50", "max_pages": 500},
-    })
+    regions = dc.get(
+        "regions",
+        {
+            "moscow": {"place": "0-1", "max_pages": 500},
+            "mo": {"place": "50", "max_pages": 500},
+        },
+    )
 
     result = []
     for name, rcfg in regions.items():
@@ -289,7 +304,9 @@ async def _listing_worker(name, browser, url_tpl, pages, result_urls, seen, cfg,
                 log.info(f"[{name}] SP passed")
                 if "__NEXT_DATA__" not in (await page.content()):
                     try:
-                        await page.goto(url, timeout=60000, wait_until="domcontentloaded")
+                        await page.goto(
+                            url, timeout=60000, wait_until="domcontentloaded"
+                        )
                         await asyncio.sleep(3)
                     except Exception:
                         pass
@@ -332,7 +349,9 @@ async def _listing_worker(name, browser, url_tpl, pages, result_urls, seen, cfg,
                     result_urls.append(flat_url)
                     new += 1
 
-            log.info(f"[{name}] p.{pg}: {len(flats)} flats, {new} new, total {len(result_urls)}")
+            log.info(
+                f"[{name}] p.{pg}: {len(flats)} flats, {new} new, total {len(result_urls)}"
+            )
             ld = _domrf_cfg(cfg).get("listing_delay", [0.3, 0.8])
             await jittered_delay(ld[0], ld[1])
     finally:
@@ -358,8 +377,7 @@ async def crawl_listings(browser, cfg, seen):
             break
 
         page_ranges = [
-            list(range(i + 1, max_pages + 1, n_workers))
-            for i in range(n_workers)
+            list(range(i + 1, max_pages + 1, n_workers)) for i in range(n_workers)
         ]
 
         log.info(
@@ -373,8 +391,14 @@ async def crawl_listings(browser, cfg, seen):
                 continue
             tasks.append(
                 _listing_worker(
-                    f"L{i + 1}:{region_name}", browser, url_tpl,
-                    page_ranges[i], all_urls, seen, cfg, pool=pool,
+                    f"L{i + 1}:{region_name}",
+                    browser,
+                    url_tpl,
+                    page_ranges[i],
+                    all_urls,
+                    seen,
+                    cfg,
+                    pool=pool,
                 )
             )
         await asyncio.gather(*tasks)
@@ -399,7 +423,9 @@ async def crawl_listings(browser, cfg, seen):
             log.info(f"[WARMUP] ok via {px and px['server']}")
             break
         except Exception as e:
-            log.warning(f"[WARMUP] attempt {attempt + 1} failed ({px and px['server']}): {e!r:.120}")
+            log.warning(
+                f"[WARMUP] attempt {attempt + 1} failed ({px and px['server']}): {e!r:.120}"
+            )
         finally:
             await page.close()
             await ctx.close()
@@ -446,7 +472,9 @@ async def _offer_worker(name, browser, urls, stats, storage_state, cfg, pool):
             if rotate:
                 proxy = await pool.next()
             try:
-                ctx = await _create_context(browser, proxy=proxy, storage_state=storage_state)
+                ctx = await _create_context(
+                    browser, proxy=proxy, storage_state=storage_state
+                )
                 page = await ctx.new_page()
                 await apply_cdp_blocking(page, extra_patterns=OFFER_BLOCK_EXTRA)
             except Exception as e:
@@ -584,18 +612,24 @@ async def _run_session(cfg):
                     ctx = await _create_context(browser, proxy=px)
                     page = await ctx.new_page()
                     try:
-                        await page.goto(warmup_url, timeout=30000, wait_until="domcontentloaded")
+                        await page.goto(
+                            warmup_url, timeout=30000, wait_until="domcontentloaded"
+                        )
                         await _wait_for_sp(page)
                         storage = await ctx.storage_state()
                         log.info(f"[WARMUP] ok via {px and px['server']}")
                         break
                     except Exception as e:
-                        log.warning(f"[WARMUP] attempt {attempt + 1} failed: {e!r:.120}")
+                        log.warning(
+                            f"[WARMUP] attempt {attempt + 1} failed: {e!r:.120}"
+                        )
                     finally:
                         await page.close()
                         await ctx.close()
                 if not storage:
-                    log.warning("[WARMUP] all failed -- workers will pass SP individually")
+                    log.warning(
+                        "[WARMUP] all failed -- workers will pass SP individually"
+                    )
             else:
                 all_urls, storage = await crawl_listings(browser, cfg, seen)
 
@@ -617,8 +651,13 @@ async def _run_session(cfg):
                 tasks.append(
                     asyncio.create_task(
                         _offer_worker(
-                            f"W{i + 1}", browser, chunk,
-                            stats, storage, cfg, pool=offer_pool,
+                            f"W{i + 1}",
+                            browser,
+                            chunk,
+                            stats,
+                            storage,
+                            cfg,
+                            pool=offer_pool,
                         )
                     )
                 )

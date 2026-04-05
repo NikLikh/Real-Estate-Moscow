@@ -12,15 +12,43 @@ log = logging.getLogger("re")
 
 # порядок колонок = порядок в INSERT, должен совпадать с init.sql
 COLUMNS = [
-    "url", "source", "price", "price_per_m2", "discount_pct",
-    "deal_conditions", "city", "region", "district", "street",
-    "house_number", "lat", "lon", "metro_stations", "transport_score",
-    "rooms", "total_area", "living_area", "kitchen_area", "floor",
-    "total_floors", "ceiling_height", "renovation", "bathrooms",
-    "balcony", "window_view", "is_apartments", "year_built",
-    "building_type", "parking", "elevators", "is_new_building",
-    "developer", "residential_complex", "completion_date",
-    "description", "publication_date",
+    "url",
+    "source",
+    "price",
+    "price_per_m2",
+    "discount_pct",
+    "deal_conditions",
+    "city",
+    "region",
+    "district",
+    "street",
+    "house_number",
+    "lat",
+    "lon",
+    "metro_stations",
+    "transport_score",
+    "rooms",
+    "total_area",
+    "living_area",
+    "kitchen_area",
+    "floor",
+    "total_floors",
+    "ceiling_height",
+    "renovation",
+    "bathrooms",
+    "balcony",
+    "window_view",
+    "is_apartments",
+    "year_built",
+    "building_type",
+    "parking",
+    "elevators",
+    "is_new_building",
+    "developer",
+    "residential_complex",
+    "completion_date",
+    "description",
+    "publication_date",
 ]
 
 # price в unique key, потому что одна квартира может менять цену
@@ -61,7 +89,9 @@ def build_row(record: dict) -> dict:
         if col == "metro_stations" and value is not None:
             value = Json(value)
         if col == "is_apartments" and value is None:
-            value = _clean_value(record.get("is_apartment"))  # разные источники пишут по-разному
+            value = _clean_value(
+                record.get("is_apartment")
+            )  # разные источники пишут по-разному
         row[col] = value
     return row
 

@@ -95,7 +95,7 @@ cb_window: 30
 cb_threshold: 6
 cb_cooldown: 90
 
-# проактивный cooldown чтобы не дожидаться WAF-блока
+# проактивный cooldown, чтобы не дожидаться WAF-блока
 ip_budget: 9000
 ip_budget_cooldown: 300
 
@@ -106,7 +106,7 @@ min_new_first_page: 5
 max_offers_per_filter: 1000
 min_price_split: 500_000
 
-loop_pause: 60  # секунд между прогонами (ночной loop)
+loop_pause: 60  # секунд между прогонами
 max_restarts: 50
 restart_cooldown: 1800
 max_worker_crashes: 10
@@ -133,9 +133,9 @@ captcha_api_key: null
 captcha_long_pause: [15, 30]
 
 # curl_cffi offer/listing workers, параллельно с browser crawl
-http_listing_workers: 10
-http_offer_workers: 15
-http_per_slot_concurrency: 5
+http_listing_workers: 20
+http_offer_workers: 20
+http_per_slot_concurrency: 20
 http_rate_per_slot: 3.0  # req/s на слот: 0.5 = 5ч lifetime, 1.0 = 2.5ч, 3.0 = 50мин
 http_timeout: 15
 http_retry_max: 3

@@ -21,7 +21,9 @@ DB_CONFIG = {
 }
 
 # PySpark пишет в ту же БД, но через JDBC
-JDBC_URL = f"jdbc:postgresql://{DB_CONFIG['host']}:{DB_CONFIG['port']}/{DB_CONFIG['dbname']}"
+JDBC_URL = (
+    f"jdbc:postgresql://{DB_CONFIG['host']}:{DB_CONFIG['port']}/{DB_CONFIG['dbname']}"
+)
 JDBC_PROPS = {
     "user": DB_CONFIG["user"],
     "password": DB_CONFIG["password"],
@@ -30,7 +32,9 @@ JDBC_PROPS = {
 
 # Java/Spark не работает с кириллицей в пути -- используем алиас Nikita
 _jars = PROJECT_ROOT / "jars" / "postgresql-42.7.4.jar"
-JARS_PATH = str(_jars).replace("Никита", "Nikita") if "Никита" in str(_jars) else str(_jars)
+JARS_PATH = (
+    str(_jars).replace("Никита", "Nikita") if "Никита" in str(_jars) else str(_jars)
+)
 
 # один раз на весь проект, формат без лишнего
 logging.basicConfig(
@@ -86,7 +90,8 @@ def _apply_scraper_env_overrides(cfg):
         "headless": _env_bool("SCRAPER_HEADLESS"),
         "vpn_headless": _env_bool("SCRAPER_VPN_HEADLESS"),
         "web_proxy_enabled": _env_bool("SCRAPER_WEB_PROXY_ENABLED"),
-        "vless_socks_port": _env_int("VLESS_SOCKS_PORT") or _env_int("SCRAPER_VLESS_SOCKS_PORT"),
+        "vless_socks_port": _env_int("VLESS_SOCKS_PORT")
+        or _env_int("SCRAPER_VLESS_SOCKS_PORT"),
         "vds_socks_port": _env_int("SCRAPER_VDS_SOCKS_PORT"),
         "runtime_endpoint_types": _env_csv("SCRAPER_RUNTIME_ENDPOINT_TYPES"),
         "experimental_endpoint_types": _env_csv("SCRAPER_EXPERIMENTAL_ENDPOINT_TYPES"),

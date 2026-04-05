@@ -84,14 +84,17 @@ class HttpPool:
 
     def report_budget(self, slot: HttpSlot, cooldown=300):
         slot.cooldown_until = time.monotonic() + cooldown
-        log.info(f"[HTTP] {slot.label} budget exhausted ({slot.reqs}), cooling {cooldown}s")
+        log.info(
+            f"[HTTP] {slot.label} budget exhausted ({slot.reqs}), cooling {cooldown}s"
+        )
         slot.reqs = 0
 
     @property
     def alive(self) -> int:
         now = time.monotonic()
         return sum(
-            1 for s in self._slots
+            1
+            for s in self._slots
             if s.cooldown_until <= now and (not s.budget or s.reqs < s.budget)
         )
 
@@ -137,7 +140,9 @@ def _is_vpn_block(html: str) -> bool:
 async def fetch_offer(session, url, slot, pool, stats, cfg):
     try:
         resp = await session.get(
-            url, headers=_headers(), timeout=cfg.get("http_timeout", 15),
+            url,
+            headers=_headers(),
+            timeout=cfg.get("http_timeout", 15),
             allow_redirects=True,
         )
     except Exception as e:
@@ -204,14 +209,18 @@ async def fetch_offer(session, url, slot, pool, stats, cfg):
     return rows, timings
 
 
-async def http_offer_worker(name, url_queue, retry_queue, row_queue, pool, stats, cfg, cookies=None):
+async def http_offer_worker(
+    name, url_queue, retry_queue, row_queue, pool, stats, cfg, cookies=None
+):
     # curl_cffi: один session per proxy, impersonate Chrome TLS
     sessions = {}
 
     async def get_session(proxy):
         if proxy not in sessions:
             sessions[proxy] = AsyncSession(
-                impersonate="chrome", proxy=proxy, max_clients=20,
+                impersonate="chrome",
+                proxy=proxy,
+                max_clients=20,
             )
         return sessions[proxy]
 
@@ -263,28 +272,53 @@ async def _proxy_refresher(pool, cfg, interval=300):
         await asyncio.sleep(interval)
         try:
             fresh = await discover_free_proxies(
-                timeout=4, max_candidates=2000, validation_timeout=30,
+                timeout=4,
+                max_candidates=2000,
+                validation_timeout=30,
             )
             added = 0
             for proxy_url in fresh:
                 if proxy_url not in known_addrs:
                     known_addrs.add(proxy_url)
-                    proto = "socks5" if "socks5" in proxy_url else ("socks4" if "socks4" in proxy_url else "http")
-                    pool.add_slot(HttpSlot(proxy=proxy_url, label=f"fresh-{proto}-{pool.slot_count}"))
+                    proto = (
+                        "socks5"
+                        if "socks5" in proxy_url
+                        else ("socks4" if "socks4" in proxy_url else "http")
+                    )
+                    pool.add_slot(
+                        HttpSlot(
+                            proxy=proxy_url, label=f"fresh-{proto}-{pool.slot_count}"
+                        )
+                    )
                     added += 1
             if added:
-                log.info(f"[HTTP] refresher: +{added} new proxies, total {pool.slot_count} slots")
+                log.info(
+                    f"[HTTP] refresher: +{added} new proxies, total {pool.slot_count} slots"
+                )
         except Exception as e:
             log.debug(f"[HTTP] refresher error: {e}")
 
 
-async def run_http_workers(n, url_queue, retry_queue, row_queue, pool, stats, cfg, cookies=None):
+async def run_http_workers(
+    n, url_queue, retry_queue, row_queue, pool, stats, cfg, cookies=None
+):
     refresh_interval = cfg.get("proxy_refresh_interval", 300)
-    refresher = asyncio.create_task(_proxy_refresher(pool, cfg, interval=refresh_interval))
+    refresher = asyncio.create_task(
+        _proxy_refresher(pool, cfg, interval=refresh_interval)
+    )
 
     tasks = [
         asyncio.create_task(
-            http_offer_worker(f"H{i+1}", url_queue, retry_queue, row_queue, pool, stats, cfg, cookies=cookies)
+            http_offer_worker(
+                f"H{i+1}",
+                url_queue,
+                retry_queue,
+                row_queue,
+                pool,
+                stats,
+                cfg,
+                cookies=cookies,
+            )
         )
         for i in range(n)
     ]
@@ -297,7 +331,9 @@ async def run_http_workers(n, url_queue, retry_queue, row_queue, pool, stats, cf
 async def fetch_listing(session, url, slot, pool, stats, cfg):
     try:
         resp = await session.get(
-            url, headers=_headers(), timeout=cfg.get("http_timeout", 15),
+            url,
+            headers=_headers(),
+            timeout=cfg.get("http_timeout", 15),
             allow_redirects=True,
         )
     except Exception as e:
@@ -349,12 +385,16 @@ async def fetch_listing(session, url, slot, pool, stats, cfg):
     return urls
 
 
-async def http_listing_worker(name, filters, url_queue, seen, completed, pool, stats, cfg):
+async def http_listing_worker(
+    name, filters, url_queue, seen, completed, pool, stats, cfg
+):
     sessions = {}
 
     async def get_session(proxy):
         if proxy not in sessions:
-            sessions[proxy] = AsyncSession(impersonate="chrome", proxy=proxy, max_clients=10)
+            sessions[proxy] = AsyncSession(
+                impersonate="chrome", proxy=proxy, max_clients=10
+            )
         return sessions[proxy]
 
     max_pages = cfg.get("max_pages", 54)
@@ -424,7 +464,9 @@ async def run_http_listings(n, filters, url_queue, seen, completed, pool, stats,
     chunks = [filters[i::n] for i in range(n)]
     tasks = [
         asyncio.create_task(
-            http_listing_worker(f"HL{i+1}", chunks[i], url_queue, seen, completed, pool, stats, cfg)
+            http_listing_worker(
+                f"HL{i+1}", chunks[i], url_queue, seen, completed, pool, stats, cfg
+            )
         )
         for i in range(n)
         if chunks[i]
@@ -460,29 +502,74 @@ async def _check_ip(proxy=None, timeout=5) -> str | None:
 
 PROXY_SOURCES = [
     # GitHub raw -- обновляются CI/CD пайплайнами, самые надежные
-    ("socks5", "https://raw.githubusercontent.com/TheSpeedX/SOCKS-List/master/socks5.txt"),
-    ("socks4", "https://raw.githubusercontent.com/TheSpeedX/SOCKS-List/master/socks4.txt"),
-    ("http",   "https://raw.githubusercontent.com/TheSpeedX/SOCKS-List/master/http.txt"),
-    ("socks5", "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/socks5.txt"),
-    ("socks4", "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/socks4.txt"),
-    ("http",   "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/http.txt"),
-    ("socks5", "https://raw.githubusercontent.com/hookzof/socks5_list/master/proxy.txt"),
+    (
+        "socks5",
+        "https://raw.githubusercontent.com/TheSpeedX/SOCKS-List/master/socks5.txt",
+    ),
+    (
+        "socks4",
+        "https://raw.githubusercontent.com/TheSpeedX/SOCKS-List/master/socks4.txt",
+    ),
+    ("http", "https://raw.githubusercontent.com/TheSpeedX/SOCKS-List/master/http.txt"),
+    (
+        "socks5",
+        "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/socks5.txt",
+    ),
+    (
+        "socks4",
+        "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/socks4.txt",
+    ),
+    (
+        "http",
+        "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/http.txt",
+    ),
+    (
+        "socks5",
+        "https://raw.githubusercontent.com/hookzof/socks5_list/master/proxy.txt",
+    ),
     ("socks5", "https://raw.githubusercontent.com/prxchk/proxy-list/main/socks5.txt"),
     ("socks4", "https://raw.githubusercontent.com/prxchk/proxy-list/main/socks4.txt"),
-    ("http",   "https://raw.githubusercontent.com/prxchk/proxy-list/main/http.txt"),
-    ("socks5", "https://raw.githubusercontent.com/ErcinDedeoglu/proxies/main/proxies/socks5.txt"),
-    ("socks4", "https://raw.githubusercontent.com/ErcinDedeoglu/proxies/main/proxies/socks4.txt"),
-    ("http",   "https://raw.githubusercontent.com/ErcinDedeoglu/proxies/main/proxies/https.txt"),
-    ("socks5", "https://cdn.jsdelivr.net/gh/proxifly/free-proxy-list@main/proxies/protocols/socks5/data.txt"),
-    ("socks4", "https://cdn.jsdelivr.net/gh/proxifly/free-proxy-list@main/proxies/protocols/socks4/data.txt"),
-    ("http",   "https://cdn.jsdelivr.net/gh/proxifly/free-proxy-list@main/proxies/protocols/http/data.txt"),
+    ("http", "https://raw.githubusercontent.com/prxchk/proxy-list/main/http.txt"),
+    (
+        "socks5",
+        "https://raw.githubusercontent.com/ErcinDedeoglu/proxies/main/proxies/socks5.txt",
+    ),
+    (
+        "socks4",
+        "https://raw.githubusercontent.com/ErcinDedeoglu/proxies/main/proxies/socks4.txt",
+    ),
+    (
+        "http",
+        "https://raw.githubusercontent.com/ErcinDedeoglu/proxies/main/proxies/https.txt",
+    ),
+    (
+        "socks5",
+        "https://cdn.jsdelivr.net/gh/proxifly/free-proxy-list@main/proxies/protocols/socks5/data.txt",
+    ),
+    (
+        "socks4",
+        "https://cdn.jsdelivr.net/gh/proxifly/free-proxy-list@main/proxies/protocols/socks4/data.txt",
+    ),
+    (
+        "http",
+        "https://cdn.jsdelivr.net/gh/proxifly/free-proxy-list@main/proxies/protocols/http/data.txt",
+    ),
     # API сервисы
-    ("socks5", "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=socks5&timeout=5000&country=all"),
-    ("socks4", "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=socks4&timeout=5000&country=all"),
-    ("http",   "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=http&timeout=5000&country=all"),
+    (
+        "socks5",
+        "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=socks5&timeout=5000&country=all",
+    ),
+    (
+        "socks4",
+        "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=socks4&timeout=5000&country=all",
+    ),
+    (
+        "http",
+        "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=http&timeout=5000&country=all",
+    ),
     # spys.me
     ("socks5", "https://spys.me/socks.txt"),
-    ("http",   "https://spys.me/proxy.txt"),
+    ("http", "https://spys.me/proxy.txt"),
 ]
 
 
@@ -501,7 +588,7 @@ def _parse_proxy_lines(text):
         # убрать protocol prefix
         for prefix in ("socks5://", "socks4://", "http://", "https://"):
             if line.startswith(prefix):
-                line = line[len(prefix):]
+                line = line[len(prefix) :]
                 break
 
         # первый токен до пробела = предполагаемый ip:port
@@ -520,6 +607,7 @@ async def _fetch_all_candidates() -> dict[str, str]:
     async with AsyncSession(impersonate="chrome") as s:
         fetch_tasks = []
         for default_proto, url in PROXY_SOURCES:
+
             async def fetch_one(default_proto=default_proto, url=url):
                 try:
                     resp = await s.get(url, timeout=8)
@@ -531,13 +619,14 @@ async def _fetch_all_candidates() -> dict[str, str]:
                         for pfx in ("socks5://", "socks4://", "http://", "https://"):
                             if line.startswith(pfx):
                                 proto = pfx.rstrip(":/")
-                                line = line[len(pfx):]
+                                line = line[len(pfx) :]
                                 break
                         addr = line.split()[0]
                         if _ADDR_RE.match(addr) and addr not in candidates:
                             candidates[addr] = proto
                 except Exception:
                     pass
+
             fetch_tasks.append(fetch_one())
 
         try:
@@ -571,12 +660,17 @@ async def _validate_batch(items, timeout=4, validation_timeout=30) -> list[str]:
 
 
 async def discover_free_proxies(
-    timeout=4, batch_size=2000, validation_timeout=30,
-    min_target=10, max_rounds=5,
+    timeout=4,
+    batch_size=2000,
+    validation_timeout=30,
+    min_target=10,
+    max_rounds=5,
 ) -> list[str]:
     candidates = await _fetch_all_candidates()
 
-    log.info(f"[HTTP] proxy sources: {len(candidates)} unique candidates from {len(PROXY_SOURCES)} sources")
+    log.info(
+        f"[HTTP] proxy sources: {len(candidates)} unique candidates from {len(PROXY_SOURCES)} sources"
+    )
     if not candidates:
         return []
 
@@ -587,20 +681,24 @@ async def discover_free_proxies(
     offset = 0
 
     for round_n in range(1, max_rounds + 1):
-        batch = all_items[offset:offset + batch_size]
+        batch = all_items[offset : offset + batch_size]
         if not batch:
             break
         offset += batch_size
 
         log.info(f"[HTTP] round {round_n}: validating {len(batch)} proxies...")
-        found = await _validate_batch(batch, timeout=timeout, validation_timeout=validation_timeout)
+        found = await _validate_batch(
+            batch, timeout=timeout, validation_timeout=validation_timeout
+        )
         working.extend(found)
         log.info(f"[HTTP] round {round_n}: +{len(found)}, total {len(working)} working")
 
         if len(working) >= min_target:
             break
 
-    log.info(f"[HTTP] free proxies: {len(working)}/{min(offset, len(all_items))} working")
+    log.info(
+        f"[HTTP] free proxies: {len(working)}/{min(offset, len(all_items))} working"
+    )
     return working
 
 
@@ -637,6 +735,7 @@ async def build_http_pool(cfg) -> HttpPool:
     # CyberGhost -- статический server_list.json, БЕЗ browser launch (приоритет)
     try:
         from scraper.vpn_ext import download_extension
+
         download_extension("cyberghost")
     except Exception as e:
         log.debug(f"[HTTP] cyberghost download: {e}")
@@ -678,7 +777,13 @@ async def build_http_pool(cfg) -> HttpPool:
 async def _discover_cyberghost_servers() -> list[tuple[str, str, str]]:
     # CyberGhost хранит серверы в статическом JSON внутри CRX
     # формат nodes: {dnsname: "hostname:9002"} -> HTTPS proxy на порту 9002
-    server_list = Path(__file__).resolve().parent.parent / "extensions" / "cyberghost" / "assets" / "server_list.json"
+    server_list = (
+        Path(__file__).resolve().parent.parent
+        / "extensions"
+        / "cyberghost"
+        / "assets"
+        / "server_list.json"
+    )
     if not server_list.exists():
         return []
 
@@ -708,7 +813,9 @@ async def _discover_cyberghost_servers() -> list[tuple[str, str, str]]:
                 result.append((f"cg-{country}", proxy, ip))
 
     await asyncio.gather(*(check(c, d) for c, d in all_nodes))
-    log.info(f"[HTTP] cyberghost: {len(result)}/{len(all_nodes)} nodes working ({len(seen_ips)} unique IPs)")
+    log.info(
+        f"[HTTP] cyberghost: {len(result)}/{len(all_nodes)} nodes working ({len(seen_ips)} unique IPs)"
+    )
     return result
 
 
@@ -735,7 +842,9 @@ async def _discover_browsec_servers(cfg) -> list[tuple[str, str, str]]:
     try:
         async with async_playwright() as pw:
             # подключаемся к первому серверу чтобы получить PAC данные
-            ctx, bg = await launch_vpn_context(pw, "browsec", servers_to_try[0], headless=False)
+            ctx, bg = await launch_vpn_context(
+                pw, "browsec", servers_to_try[0], headless=False
+            )
             try:
                 pac_data = await bg.evaluate("""async () => {
                     const items = await new Promise(r => chrome.storage.local.get('lowLevelPac', r));
@@ -756,7 +865,9 @@ async def _discover_browsec_servers(cfg) -> list[tuple[str, str, str]]:
                 addr = raw.replace("HTTPS ", "").replace("HTTP ", "")
                 all_servers.append((country, addr))
 
-        log.info(f"[HTTP] browsec: {len(all_servers)} servers from {len(pac_data['countries'])} countries")
+        log.info(
+            f"[HTTP] browsec: {len(all_servers)} servers from {len(pac_data['countries'])} countries"
+        )
 
         # валидируем через curl_cffi
         sem = asyncio.Semaphore(10)

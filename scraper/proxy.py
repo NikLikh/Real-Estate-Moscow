@@ -1,4 +1,4 @@
-"""Runtime endpoint discovery, preflight, proxy pool."""
+"""Runtime endpoint discovery, preflight, proxy pool"""
 
 import asyncio
 import logging
@@ -41,7 +41,10 @@ class GotoThrottle:
 
 
 def _infer_slot_class(proxy_str, ep_type="proxy", driver="native"):
-    if ep_type == EndpointKind.BROWSER_GATEWAY.value or driver != EndpointDriver.NATIVE.value:
+    if (
+        ep_type == EndpointKind.BROWSER_GATEWAY.value
+        or driver != EndpointDriver.NATIVE.value
+    ):
         return "browser_gateway"
     if not proxy_str:
         return "direct"
@@ -139,14 +142,18 @@ class ProxyPool:
         budget = cfg.get("ip_budget", 9000)
         budget_cooldown = cfg.get("ip_budget_cooldown", 300)
         raw = cfg.get("verified_endpoints") or cfg.get("endpoints")
-        raw = raw or [{"name": "direct", "proxy": None, "rate_limit": 4.0, "type": "proxy"}]
+        raw = raw or [
+            {"name": "direct", "proxy": None, "rate_limit": 4.0, "type": "proxy"}
+        ]
 
         self._endpoints = [_Endpoint(ep, budget=budget) for ep in raw]
         self._group_indexes = {}
         self._budget_cooldown = budget_cooldown
 
         names = [f"{ep.name}[{ep.slot_class}]" for ep in self._endpoints]
-        log.info(f"[POOL] {len(self._endpoints)} verified endpoints: {', '.join(names)}")
+        log.info(
+            f"[POOL] {len(self._endpoints)} verified endpoints: {', '.join(names)}"
+        )
 
         self._waf_times = []
         self._cb_window = cfg.get("cb_window", 30)
@@ -176,7 +183,8 @@ class ProxyPool:
                     return ep.to_dict()
 
         candidates = [
-            ep for ep in self._endpoints
+            ep
+            for ep in self._endpoints
             if ep.available and (not allowed or ep.name in allowed)
         ]
         key = tuple(sorted(allowed)) if allowed else "all"
@@ -185,17 +193,19 @@ class ProxyPool:
             return ep.to_dict()
 
         active = [
-            ep for ep in self._endpoints
+            ep
+            for ep in self._endpoints
             if ep.active and (not allowed or ep.name in allowed)
         ]
         ep = self._pick(active, f"{key}:active")
         if ep:
-            log.warning(f"[POOL] all allowed endpoints cooling, using active fallback: {ep.name}")
+            log.warning(
+                f"[POOL] all allowed endpoints cooling, using active fallback: {ep.name}"
+            )
             return ep.to_dict()
 
         fallback_pool = [
-            ep for ep in self._endpoints
-            if not allowed or ep.name in allowed
+            ep for ep in self._endpoints if not allowed or ep.name in allowed
         ]
         ep = self._pick(fallback_pool, f"{key}:all")
         if ep:
@@ -204,7 +214,9 @@ class ProxyPool:
                     f"[POOL] all allowed endpoints cooling, using same-slot fallback: {ep.name}"
                 )
             else:
-                log.warning(f"[POOL] all endpoints cooling, using hard fallback: {ep.name}")
+                log.warning(
+                    f"[POOL] all endpoints cooling, using hard fallback: {ep.name}"
+                )
             return ep.to_dict()
 
         raise RuntimeError("proxy pool is empty")
@@ -239,7 +251,9 @@ class ProxyPool:
             self._cb_until = time.monotonic() + self._cb_cooldown
             self._cb_tripped = True
             self._waf_times.clear()
-            log.warning(f"[CIRCUIT] OPEN -- all workers paused for {self._cb_cooldown}s")
+            log.warning(
+                f"[CIRCUIT] OPEN -- all workers paused for {self._cb_cooldown}s"
+            )
 
     def report_success(self, name):
         for ep in self._endpoints:
@@ -298,12 +312,21 @@ async def _resolve_public_ip(ctx, timeout=10000):
     page = await ctx.new_page()
     try:
         checks = [
-            ("https://api.ipify.org", lambda text: text.strip() if "." in text else None),
-            ("https://ifconfig.me/ip", lambda text: text.strip() if "." in text else None),
+            (
+                "https://api.ipify.org",
+                lambda text: text.strip() if "." in text else None,
+            ),
+            (
+                "https://ifconfig.me/ip",
+                lambda text: text.strip() if "." in text else None,
+            ),
             (
                 "https://httpbin.org/ip",
-                lambda text: text.split('"origin"')[1].split('"')[1].strip()
-                if '"origin"' in text else None,
+                lambda text: (
+                    text.split('"origin"')[1].split('"')[1].strip()
+                    if '"origin"' in text
+                    else None
+                ),
             ),
         ]
         for url, parser in checks:
@@ -333,17 +356,22 @@ async def _verify_loaded_page(page, started):
         return False, "waf_block", title[:60], time.monotonic() - started
 
     ok = (
-        "cian" in title_l or
-        "циан" in title_l or
-        "недвижим" in title_l or
-        "cian.ru" in url
+        "cian" in title_l
+        or "циан" in title_l
+        or "недвижим" in title_l
+        or "cian.ru" in url
     )
     if await detect_captcha(page):
         if ok or "cian.ru" in url:
             return True, "captcha_warmup", title[:60], time.monotonic() - started
         return False, "captcha", title[:60], time.monotonic() - started
     if not ok:
-        return False, f"unexpected_title:{title[:60]}", title[:60], time.monotonic() - started
+        return (
+            False,
+            f"unexpected_title:{title[:60]}",
+            title[:60],
+            time.monotonic() - started,
+        )
     return True, "ok", title[:60], time.monotonic() - started
 
 
@@ -530,11 +558,21 @@ def _endpoint_policy(cfg, rate_limit, overrides=None):
     policy = {
         "rate_limit": overrides.get("rate_limit", rate_limit),
         "budget_limit": overrides.get("budget_limit", cfg.get("ip_budget", 9000)),
-        "budget_cooldown": overrides.get("budget_cooldown", cfg.get("ip_budget_cooldown", 300)),
-        "waf_cooldown": overrides.get("waf_cooldown", cfg.get("waf_endpoint_cooldown", 30)),
-        "network_cooldown": overrides.get("network_cooldown", default_cfg.get("network_cooldown", 20)),
-        "captcha_cooldown": overrides.get("captcha_cooldown", default_cfg.get("captcha_cooldown", 30)),
-        "quarantine_cooldown": overrides.get("quarantine_cooldown", default_cfg.get("quarantine_cooldown", 900)),
+        "budget_cooldown": overrides.get(
+            "budget_cooldown", cfg.get("ip_budget_cooldown", 300)
+        ),
+        "waf_cooldown": overrides.get(
+            "waf_cooldown", cfg.get("waf_endpoint_cooldown", 30)
+        ),
+        "network_cooldown": overrides.get(
+            "network_cooldown", default_cfg.get("network_cooldown", 20)
+        ),
+        "captcha_cooldown": overrides.get(
+            "captcha_cooldown", default_cfg.get("captcha_cooldown", 30)
+        ),
+        "quarantine_cooldown": overrides.get(
+            "quarantine_cooldown", default_cfg.get("quarantine_cooldown", 900)
+        ),
         "max_warming_failures": overrides.get(
             "max_warming_failures", default_cfg.get("max_warming_failures", 2)
         ),
@@ -588,50 +626,69 @@ def _discover_local_proxy_candidates(cfg):
     runtime_types = _runtime_endpoint_types(cfg)
     candidates = []
 
-    if EndpointKind.PROXY.value in runtime_types or EndpointKind.DIRECT.value in runtime_types:
-        candidates.append(_normalize_endpoint({
-            "name": "direct",
-            "proxy": None,
-            "rate_limit": 4.0,
-            "type": EndpointKind.DIRECT.value,
-            "kind": EndpointKind.DIRECT.value,
-            "driver": EndpointDriver.NATIVE.value,
-            "slot_class": "direct",
-            "policy": _endpoint_policy(cfg, 4.0),
-        }))
+    if (
+        EndpointKind.PROXY.value in runtime_types
+        or EndpointKind.DIRECT.value in runtime_types
+    ):
+        candidates.append(
+            _normalize_endpoint(
+                {
+                    "name": "direct",
+                    "proxy": None,
+                    "rate_limit": 4.0,
+                    "type": EndpointKind.DIRECT.value,
+                    "kind": EndpointKind.DIRECT.value,
+                    "driver": EndpointDriver.NATIVE.value,
+                    "slot_class": "direct",
+                    "policy": _endpoint_policy(cfg, 4.0),
+                }
+            )
+        )
 
     vless_port = int(cfg.get("vless_socks_port", 10808))
-    if EndpointKind.PROXY.value in runtime_types and _port_open("127.0.0.1", vless_port):
-        candidates.append(_normalize_endpoint({
-            "name": "vless",
-            "proxy": f"socks5://127.0.0.1:{vless_port}",
-            "rate_limit": 4.0,
-            "type": EndpointKind.PROXY.value,
-            "kind": EndpointKind.PROXY.value,
-            "driver": EndpointDriver.NATIVE.value,
-            "slot_class": "socks5",
-            "policy": _endpoint_policy(cfg, 4.0),
-        }))
+    if EndpointKind.PROXY.value in runtime_types and _port_open(
+        "127.0.0.1", vless_port
+    ):
+        candidates.append(
+            _normalize_endpoint(
+                {
+                    "name": "vless",
+                    "proxy": f"socks5://127.0.0.1:{vless_port}",
+                    "rate_limit": 4.0,
+                    "type": EndpointKind.PROXY.value,
+                    "kind": EndpointKind.PROXY.value,
+                    "driver": EndpointDriver.NATIVE.value,
+                    "slot_class": "socks5",
+                    "policy": _endpoint_policy(cfg, 4.0),
+                }
+            )
+        )
 
     vds_port = int(cfg.get("vds_socks_port", 9080))
     if EndpointKind.PROXY.value in runtime_types and _port_open("127.0.0.1", vds_port):
-        candidates.append(_normalize_endpoint({
-            "name": "vds",
-            "proxy": f"socks5://127.0.0.1:{vds_port}",
-            "rate_limit": 3.0,
-            "type": EndpointKind.PROXY.value,
-            "kind": EndpointKind.PROXY.value,
-            "driver": EndpointDriver.NATIVE.value,
-            "slot_class": "socks5",
-            "policy": _endpoint_policy(cfg, 3.0),
-        }))
+        candidates.append(
+            _normalize_endpoint(
+                {
+                    "name": "vds",
+                    "proxy": f"socks5://127.0.0.1:{vds_port}",
+                    "rate_limit": 3.0,
+                    "type": EndpointKind.PROXY.value,
+                    "kind": EndpointKind.PROXY.value,
+                    "driver": EndpointDriver.NATIVE.value,
+                    "slot_class": "socks5",
+                    "policy": _endpoint_policy(cfg, 3.0),
+                }
+            )
+        )
 
     return candidates
 
 
 def _configured_runtime_candidates(cfg):
     runtime_types = _runtime_endpoint_types(cfg)
-    raw = cfg.get("endpoints") or [{"name": "direct", "proxy": None, "rate_limit": 4.0, "type": "proxy"}]
+    raw = cfg.get("endpoints") or [
+        {"name": "direct", "proxy": None, "rate_limit": 4.0, "type": "proxy"}
+    ]
     candidates = []
 
     for ep in raw:
@@ -643,16 +700,20 @@ def _configured_runtime_candidates(cfg):
         candidates.append(norm)
 
     if not candidates and EndpointKind.PROXY.value in runtime_types:
-        candidates.append(_normalize_endpoint({
-            "name": "direct",
-            "proxy": None,
-            "rate_limit": 4.0,
-            "type": EndpointKind.DIRECT.value,
-            "kind": EndpointKind.DIRECT.value,
-            "driver": EndpointDriver.NATIVE.value,
-            "slot_class": "direct",
-            "policy": _endpoint_policy(cfg, 4.0),
-        }))
+        candidates.append(
+            _normalize_endpoint(
+                {
+                    "name": "direct",
+                    "proxy": None,
+                    "rate_limit": 4.0,
+                    "type": EndpointKind.DIRECT.value,
+                    "kind": EndpointKind.DIRECT.value,
+                    "driver": EndpointDriver.NATIVE.value,
+                    "slot_class": "direct",
+                    "policy": _endpoint_policy(cfg, 4.0),
+                }
+            )
+        )
     return candidates
 
 
@@ -660,33 +721,39 @@ def _vpn_gateway_candidates(cfg):
     runtime_types = _runtime_endpoint_types(cfg)
     enabled = _experimental_drivers(cfg)
     runtime_enabled = (
-        EndpointKind.BROWSER_GATEWAY.value in runtime_types and
-        EndpointDriver.VPN_EXTENSION.value in enabled
+        EndpointKind.BROWSER_GATEWAY.value in runtime_types
+        and EndpointDriver.VPN_EXTENSION.value in enabled
     )
     candidates = []
     for vs in cfg.get("vpn_extensions", []):
         servers = vs.get("servers", [])
         if servers == ["auto"]:
-            log.warning(f"[DISCOVER] {vs['extension']}: servers=auto not implemented in runtime, skip")
+            log.warning(
+                f"[DISCOVER] {vs['extension']}: servers=auto not implemented in runtime, skip"
+            )
             continue
         for server in servers:
             rate_limit = vs.get("rate_limit", 2.0)
-            candidates.append(_normalize_endpoint({
-                "name": f"vpn-{vs['extension']}-{server}",
-                "type": EndpointKind.BROWSER_GATEWAY.value,
-                "kind": EndpointKind.BROWSER_GATEWAY.value,
-                "driver": EndpointDriver.VPN_EXTENSION.value,
-                "slot_class": "browser_gateway",
-                "experimental": True,
-                "runtime_enabled": runtime_enabled,
-                "policy": _endpoint_policy(cfg, rate_limit, vs.get("policy")),
-                "vpn_cfg": {
-                    "extension": vs["extension"],
-                    "server": server,
-                    "path": vs.get("path"),
-                    "headless": cfg.get("vpn_headless", False),
-                },
-            }))
+            candidates.append(
+                _normalize_endpoint(
+                    {
+                        "name": f"vpn-{vs['extension']}-{server}",
+                        "type": EndpointKind.BROWSER_GATEWAY.value,
+                        "kind": EndpointKind.BROWSER_GATEWAY.value,
+                        "driver": EndpointDriver.VPN_EXTENSION.value,
+                        "slot_class": "browser_gateway",
+                        "experimental": True,
+                        "runtime_enabled": runtime_enabled,
+                        "policy": _endpoint_policy(cfg, rate_limit, vs.get("policy")),
+                        "vpn_cfg": {
+                            "extension": vs["extension"],
+                            "server": server,
+                            "path": vs.get("path"),
+                            "headless": cfg.get("vpn_headless", False),
+                        },
+                    }
+                )
+            )
     return candidates
 
 
@@ -694,26 +761,32 @@ def _web_proxy_candidates(cfg):
     runtime_types = _runtime_endpoint_types(cfg)
     enabled = _experimental_drivers(cfg)
     runtime_enabled = (
-        cfg.get("web_proxy_enabled", False) and
-        EndpointKind.BROWSER_GATEWAY.value in runtime_types and
-        EndpointDriver.WEB_PROXY.value in enabled
+        cfg.get("web_proxy_enabled", False)
+        and EndpointKind.BROWSER_GATEWAY.value in runtime_types
+        and EndpointDriver.WEB_PROXY.value in enabled
     )
     candidates = []
     for candidate in cfg.get("web_proxy_candidates", []):
         landing = candidate["landing_url"]
         host = urlparse(landing).netloc or candidate["name"]
-        candidates.append(_normalize_endpoint({
-            "name": candidate["name"],
-            "type": EndpointKind.BROWSER_GATEWAY.value,
-            "kind": EndpointKind.BROWSER_GATEWAY.value,
-            "driver": EndpointDriver.WEB_PROXY.value,
-            "slot_class": "browser_gateway",
-            "experimental": True,
-            "runtime_enabled": runtime_enabled,
-            "network_id": f"web-proxy:{host}",
-            "policy": _endpoint_policy(cfg, candidate.get("rate_limit", 1.0), candidate.get("policy")),
-            "web_proxy_cfg": dict(candidate),
-        }))
+        candidates.append(
+            _normalize_endpoint(
+                {
+                    "name": candidate["name"],
+                    "type": EndpointKind.BROWSER_GATEWAY.value,
+                    "kind": EndpointKind.BROWSER_GATEWAY.value,
+                    "driver": EndpointDriver.WEB_PROXY.value,
+                    "slot_class": "browser_gateway",
+                    "experimental": True,
+                    "runtime_enabled": runtime_enabled,
+                    "network_id": f"web-proxy:{host}",
+                    "policy": _endpoint_policy(
+                        cfg, candidate.get("rate_limit", 1.0), candidate.get("policy")
+                    ),
+                    "web_proxy_cfg": dict(candidate),
+                }
+            )
+        )
     return candidates
 
 
@@ -744,7 +817,8 @@ def discover_runtime_candidates(cfg):
         log.info(f"  {candidate['name']}: {target}")
 
     experimental = [
-        ep["name"] for ep in configured
+        ep["name"]
+        for ep in configured
         if ep.get("experimental") and not ep.get("runtime_enabled", True)
     ]
     if experimental:
@@ -761,7 +835,9 @@ async def preflight_endpoints(cfg, candidates=None, runtime_only=True):
     from scraper.vpn_ext import ensure_extensions
 
     candidates = candidates or (
-        discover_runtime_candidates(cfg) if runtime_only else discover_configured_endpoints(cfg)
+        discover_runtime_candidates(cfg)
+        if runtime_only
+        else discover_configured_endpoints(cfg)
     )
     if not candidates:
         if runtime_only:
@@ -775,7 +851,9 @@ async def preflight_endpoints(cfg, candidates=None, runtime_only=True):
 
     async with async_playwright() as pw:
         for candidate in candidates:
-            retries = candidate.get("policy", {}).get("preflight_retries", cfg.get("endpoint_preflight_retries", 2))
+            retries = candidate.get("policy", {}).get(
+                "preflight_retries", cfg.get("endpoint_preflight_retries", 2)
+            )
             result = await _preflight_candidate(pw, candidate, retries=retries)
             if not result["ok"]:
                 log.warning(f"  {candidate['name']}: rejected -- {result['reason']}")
@@ -801,7 +879,10 @@ async def preflight_endpoints(cfg, candidates=None, runtime_only=True):
     if runtime_only:
         cfg["verified_endpoints"] = verified
         if verified:
-            names = [f"{ep['name']}[{ep['slot_class']}:{ep.get('network_id', '-') }]" for ep in verified]
+            names = [
+                f"{ep['name']}[{ep['slot_class']}:{ep.get('network_id', '-') }]"
+                for ep in verified
+            ]
             log.info(f"[PREFLIGHT] runtime pool: {', '.join(names)}")
         else:
             log.error("[PREFLIGHT] no verified runtime endpoints")
@@ -859,11 +940,18 @@ def ensure_vds_tunnel(cfg):
         return
 
     cmd = [
-        "ssh", "-D", str(port), "-N",
-        "-o", "StrictHostKeyChecking=no",
-        "-o", "ServerAliveInterval=30",
-        "-o", "ExitOnForwardFailure=yes",
-        "-i", str(key),
+        "ssh",
+        "-D",
+        str(port),
+        "-N",
+        "-o",
+        "StrictHostKeyChecking=no",
+        "-o",
+        "ServerAliveInterval=30",
+        "-o",
+        "ExitOnForwardFailure=yes",
+        "-i",
+        str(key),
         f"{user}@{host}",
     ]
 

@@ -25,12 +25,15 @@ def main():
         if args.target == "cian":
             if getattr(args, "once", False):
                 from scraper.cian import main as cian_main
+
                 asyncio.run(cian_main())
             else:
                 from scraper.cian import main_loop
+
                 asyncio.run(main_loop())
         elif args.target == "domrf":
             from scraper.domrf import main as domrf_main
+
             asyncio.run(domrf_main())
         else:
             scrape.print_help()
@@ -38,9 +41,11 @@ def main():
     elif args.command == "load":
         if args.target == "kaggle":
             from db.kaggle.loader import main as kaggle_main
+
             kaggle_main()
         elif args.target == "angultiaev":
             from db.kaggle.angultiaev import main as angultiaev_main
+
             angultiaev_main()
         else:
             load.print_help()

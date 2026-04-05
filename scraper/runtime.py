@@ -420,7 +420,9 @@ class _EndpointState:
         )
 
     def restore(self, payload):
-        self.lifecycle = EndpointLifecycle(payload.get("lifecycle", self.lifecycle.value))
+        self.lifecycle = EndpointLifecycle(
+            payload.get("lifecycle", self.lifecycle.value)
+        )
         self.network_id = payload.get("network_id", self.network_id)
         self.lease_owner = payload.get("lease_owner")
         self.lease_role = payload.get("lease_role")
@@ -434,9 +436,15 @@ class _EndpointState:
         self.quarantine_count = payload.get("quarantine_count", 0)
         self.batch_restarts = payload.get("batch_restarts", 0)
         self.warming_failures = payload.get("warming_failures", 0)
-        self.last_preflight_status = payload.get("last_preflight_status", self.last_preflight_status)
-        self.last_preflight_reason = payload.get("last_preflight_reason", self.last_preflight_reason)
-        self.last_transition_ts = payload.get("last_transition_ts", self.last_transition_ts)
+        self.last_preflight_status = payload.get(
+            "last_preflight_status", self.last_preflight_status
+        )
+        self.last_preflight_reason = payload.get(
+            "last_preflight_reason", self.last_preflight_reason
+        )
+        self.last_transition_ts = payload.get(
+            "last_transition_ts", self.last_transition_ts
+        )
         self.cooldown_until = payload.get("cooldown_until", 0.0)
         self.quarantine_until = payload.get("quarantine_until", 0.0)
         self.identity = SessionIdentity.from_dict(payload.get("identity"))
@@ -494,16 +502,24 @@ class EndpointRegistry:
         return [state.snapshot().to_dict() for state in self._states.values()]
 
     def healthy_endpoints(self):
-        return [state.endpoint_dict() for state in self._states.values() if state.healthy]
+        return [
+            state.endpoint_dict() for state in self._states.values() if state.healthy
+        ]
 
     def refresh(self):
         now = time.time()
         for state in self._states.values():
             if state.leased:
                 continue
-            if state.lifecycle == EndpointLifecycle.COOLDOWN and now >= state.cooldown_until:
+            if (
+                state.lifecycle == EndpointLifecycle.COOLDOWN
+                and now >= state.cooldown_until
+            ):
                 self._transition(state, EndpointLifecycle.WARMING, "cooldown elapsed")
-            if state.lifecycle == EndpointLifecycle.QUARANTINE and now >= state.quarantine_until:
+            if (
+                state.lifecycle == EndpointLifecycle.QUARANTINE
+                and now >= state.quarantine_until
+            ):
                 self._transition(state, EndpointLifecycle.WARMING, "quarantine elapsed")
 
     def _transition(self, state, lifecycle, reason):
@@ -556,9 +572,14 @@ class EndpointRegistry:
         state = self.get(name)
         state.requests += 1
         state.budget_used += 1
-        if state.spec.policy.budget_limit > 0 and state.budget_used >= state.spec.policy.budget_limit:
+        if (
+            state.spec.policy.budget_limit > 0
+            and state.budget_used >= state.spec.policy.budget_limit
+        ):
             state.budget_used = 0
-            self.mark_cooldown(name, "budget exhausted", state.spec.policy.budget_cooldown)
+            self.mark_cooldown(
+                name, "budget exhausted", state.spec.policy.budget_cooldown
+            )
             return True
         return False
 
@@ -614,9 +635,15 @@ class EndpointRegistry:
         now = time.time()
         for state in self._states.values():
             extra = []
-            if state.lifecycle == EndpointLifecycle.COOLDOWN and state.cooldown_until > now:
+            if (
+                state.lifecycle == EndpointLifecycle.COOLDOWN
+                and state.cooldown_until > now
+            ):
                 extra.append(f"cool={int(state.cooldown_until - now)}s")
-            if state.lifecycle == EndpointLifecycle.QUARANTINE and state.quarantine_until > now:
+            if (
+                state.lifecycle == EndpointLifecycle.QUARANTINE
+                and state.quarantine_until > now
+            ):
                 extra.append(f"quar={int(state.quarantine_until - now)}s")
             if state.lease_owner:
                 extra.append(f"lease={state.lease_owner}:{state.lease_role}")
@@ -652,7 +679,9 @@ class EndpointOrchestrator:
         self._indexes[key] = idx + 1
         return state
 
-    async def acquire(self, owner, role, allowed_names=None, prefer_name=None, shared=False):
+    async def acquire(
+        self, owner, role, allowed_names=None, prefer_name=None, shared=False
+    ):
         allowed = set(allowed_names or [])
         while True:
             async with self._lock:
@@ -661,28 +690,44 @@ class EndpointOrchestrator:
                 if prefer_name:
                     state = self.registry.get(prefer_name)
                     # shared=True: несколько workers на одном endpoint (listing при http_offers)
-                    if state.healthy and (shared or not state.leased) and (not allowed or state.spec.name in allowed):
+                    if (
+                        state.healthy
+                        and (shared or not state.leased)
+                        and (not allowed or state.spec.name in allowed)
+                    ):
                         picked = state
                 if not picked:
                     candidates = [
-                        state for state in self.registry._states.values()
-                        if state.healthy and (shared or not state.leased) and (not allowed or state.spec.name in allowed)
+                        state
+                        for state in self.registry._states.values()
+                        if state.healthy
+                        and (shared or not state.leased)
+                        and (not allowed or state.spec.name in allowed)
                     ]
                     key = tuple(sorted(allowed)) if allowed else "all"
                     picked = self._pick(candidates, key)
                 if picked:
-                    return self.registry.acquire(picked.spec.name, owner, role, shared=shared)
+                    return self.registry.acquire(
+                        picked.spec.name, owner, role, shared=shared
+                    )
             await asyncio.sleep(1)
 
     async def release(self, lease):
         async with self._lock:
             self.registry.release(lease)
 
-    async def rotate(self, lease, event: str, reason: str, allowed_names=None, prefer_name=None):
+    async def rotate(
+        self, lease, event: str, reason: str, allowed_names=None, prefer_name=None
+    ):
         async with self._lock:
             self._apply_event_locked(lease, event, reason)
             self.registry.release(lease)
-        return await self.acquire(lease.owner, lease.role, allowed_names=allowed_names, prefer_name=prefer_name)
+        return await self.acquire(
+            lease.owner,
+            lease.role,
+            allowed_names=allowed_names,
+            prefer_name=prefer_name,
+        )
 
     def _apply_event_locked(self, lease, event: str, reason: str):
         name = lease.name
@@ -700,7 +745,9 @@ class EndpointOrchestrator:
             if len(self._waf_times) >= self._cb_threshold:
                 self._cb_until = time.monotonic() + self._cb_cooldown
                 self._waf_times.clear()
-                log.warning(f"[CIRCUIT] OPEN -- all workers paused for {self._cb_cooldown}s")
+                log.warning(
+                    f"[CIRCUIT] OPEN -- all workers paused for {self._cb_cooldown}s"
+                )
             return
         if event == EndpointEvent.NETWORK:
             self.registry.record_network(name)
@@ -709,7 +756,9 @@ class EndpointOrchestrator:
             self.registry.record_captcha(name)
             return
         if event == EndpointEvent.BUDGET:
-            self.registry.mark_cooldown(name, reason or "budget", lease.state.spec.policy.budget_cooldown)
+            self.registry.mark_cooldown(
+                name, reason or "budget", lease.state.spec.policy.budget_cooldown
+            )
             return
         if event == EndpointEvent.WARMUP_FAIL:
             self.registry.record_warmup_failure(name, reason)
@@ -751,9 +800,12 @@ def queue_snapshot(queue):
         return []
 
 
-def build_runtime_session_plan(cfg, remaining_filters, endpoint_snapshots, http_offers=False):
+def build_runtime_session_plan(
+    cfg, remaining_filters, endpoint_snapshots, http_offers=False
+):
     healthy = [
-        ep for ep in endpoint_snapshots
+        ep
+        for ep in endpoint_snapshots
         if ep.get("lifecycle") == EndpointLifecycle.HEALTHY.value
     ]
     endpoint_names = [ep["name"] for ep in healthy]
@@ -766,7 +818,9 @@ def build_runtime_session_plan(cfg, remaining_filters, endpoint_snapshots, http_
         browser_cap = max(1, cfg.get("browser_pool_cap", 8))
         max_concurrent = cfg.get("max_concurrent", 8)
     else:
-        browser_cap = max(1, min(cfg.get("browser_pool_cap", healthy_count), healthy_count))
+        browser_cap = max(
+            1, min(cfg.get("browser_pool_cap", healthy_count), healthy_count)
+        )
         max_concurrent = min(cfg.get("max_concurrent", browser_cap), browser_cap)
     planner_workers = max(1, min(cfg.get("planner_workers", 3), browser_cap))
 
@@ -787,7 +841,9 @@ def build_runtime_session_plan(cfg, remaining_filters, endpoint_snapshots, http_
         serial_offer_phase = True
     else:
         max_listing = max(1, healthy_count - 1)
-        listing_count = min(cfg.get("listing_workers", 2), max_listing, max(1, remaining_filters))
+        listing_count = min(
+            cfg.get("listing_workers", 2), max_listing, max(1, remaining_filters)
+        )
         listing_slots = endpoint_names[:listing_count]
         free_names = endpoint_names[listing_count:]
         retry_count = min(cfg.get("retry_workers", 1), max(0, len(free_names) - 1))
@@ -852,7 +908,9 @@ async def _close_ctx(ctx, page):
 
 class EndpointSession:
 
-    _DEFAULT_REFERER = "https://www.cian.ru/cat.php?deal_type=sale&engine_version=2&offer_type=flat"
+    _DEFAULT_REFERER = (
+        "https://www.cian.ru/cat.php?deal_type=sale&engine_version=2&offer_type=flat"
+    )
 
     def __init__(
         self,
@@ -915,7 +973,9 @@ class EndpointSession:
             except Exception as e:
                 reason = str(e)[:120]
                 await self._safe_close()
-                await self.orchestrator.report_event(self.lease, EndpointEvent.WARMUP_FAIL, reason)
+                await self.orchestrator.report_event(
+                    self.lease, EndpointEvent.WARMUP_FAIL, reason
+                )
                 await self.orchestrator.release(self.lease)
                 self.lease = None
                 self.ep = None
@@ -972,7 +1032,9 @@ class EndpointSession:
         ref = self.referer if self.referer is not None else self._DEFAULT_REFERER
         if ref:
             await self.ctx.set_extra_http_headers({"Referer": ref})
-        self.raw_page = self.ctx.pages[0] if self.ctx.pages else await self.ctx.new_page()
+        self.raw_page = (
+            self.ctx.pages[0] if self.ctx.pages else await self.ctx.new_page()
+        )
         if self.do_warmup:
             cdp_warmup = await apply_cdp_blocking(self.raw_page)
             await warmup_session(self.raw_page)
@@ -1011,7 +1073,9 @@ class EndpointSession:
         if self.lease:
             await self.orchestrator.release(self.lease)
             self.lease = None
-        await self._acquire(prefer_name=prefer_name or current_name, allowed_names=allowed)
+        await self._acquire(
+            prefer_name=prefer_name or current_name, allowed_names=allowed
+        )
         await self._open_current()
         await self.orchestrator.report_success(self.lease)
         self._req_count = 0
@@ -1029,7 +1093,9 @@ class EndpointSession:
                 prefer_name=prefer_name,
             )
             self.ep = self.lease.endpoint
-            log.info(f"[{self.name}] {reason or event}, rotating {old_name} -> {self.lease.name}")
+            log.info(
+                f"[{self.name}] {reason or event}, rotating {old_name} -> {self.lease.name}"
+            )
         await self._open_current()
         self._req_count = 0
         self._budget_hit = False
@@ -1043,7 +1109,11 @@ class EndpointSession:
         if self.lease:
             await self.orchestrator.release(self.lease)
             self.lease = None
-        await self._acquire(prefer_name=current_name, allowed_names=self.allowed_names or ([current_name] if current_name else None))
+        await self._acquire(
+            prefer_name=current_name,
+            allowed_names=self.allowed_names
+            or ([current_name] if current_name else None),
+        )
         await self._open_current()
         await self.orchestrator.report_success(self.lease)
         self._req_count = 0
@@ -1066,7 +1136,9 @@ class EndpointSession:
 
         await self._personal_throttle.wait()
         throttle = self.lease.throttle if self.lease else None
-        result = await throttled_goto(self.page, url, sem, timeout=timeout, throttle=throttle)
+        result = await throttled_goto(
+            self.page, url, sem, timeout=timeout, throttle=throttle
+        )
         if self.lease:
             self._budget_hit = await self.orchestrator.report_request(self.lease)
         return result
@@ -1106,4 +1178,6 @@ class EndpointSession:
 
     async def report_waf_resolved(self):
         if self.lease:
-            await self.orchestrator.report_event(self.lease, EndpointEvent.WAF_RESOLVED, "waf resolved")
+            await self.orchestrator.report_event(
+                self.lease, EndpointEvent.WAF_RESOLVED, "waf resolved"
+            )
