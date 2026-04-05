@@ -2,9 +2,10 @@ import asyncio
 import logging
 import random
 import time
+from urllib.parse import urlparse
 from typing import Sequence
 
-from patchright.async_api import Browser, BrowserContext, Page
+from patchright.async_api import Browser, BrowserContext, Frame, Page
 from playwright_stealth import Stealth
 
 log = logging.getLogger("re")
@@ -42,7 +43,8 @@ async def launch_browser_pool(playwright, n: int, headless=False) -> BrowserPool
         log.info(f"browser {i + 1}/{n} launched")
     return BrowserPool(browsers)
 
-# актуальные Chrome UA, обновлять раз в пару месяцев (апрель 2026)
+
+# Chrome UA
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36",
@@ -59,13 +61,31 @@ VIEWPORTS = [
     {"width": 1600, "height": 900},
 ]
 
+
 class SessionIdentity:
     # фикс fingerprint на время жизни воркера, иначе WAF палит ротацию
 
-    def __init__(self):
-        self.user_agent = random.choice(USER_AGENTS)
-        self.viewport = random.choice(VIEWPORTS)
-        self.scale = random.choice([1, 1.25, 1.5])
+    def __init__(self, user_agent=None, viewport=None, scale=None):
+        self.user_agent = user_agent or random.choice(USER_AGENTS)
+        self.viewport = dict(viewport or random.choice(VIEWPORTS))
+        self.scale = scale if scale is not None else random.choice([1, 1.25, 1.5])
+
+    def to_dict(self):
+        return {
+            "user_agent": self.user_agent,
+            "viewport": dict(self.viewport),
+            "scale": self.scale,
+        }
+
+    @classmethod
+    def from_dict(cls, payload):
+        if not payload:
+            return cls()
+        return cls(
+            user_agent=payload.get("user_agent"),
+            viewport=payload.get("viewport"),
+            scale=payload.get("scale"),
+        )
 
 
 # блокируем трекеры, карты, шрифты, медиа чтобы экономить RAM и трафик
@@ -94,7 +114,7 @@ BLOCKED_PATTERNS = [
     "**/cdn-p.cian.site/**",
 ]
 
-# для offer-страниц: JS (главное!), CSS, SVG, картинки
+# для offer-страниц: JS, CSS, SVG, картинки
 # JS не нужен т.к. все данные в SSR (data-testid, data-name, inline <script>)
 # goto 0.5-1с вместо 20-115с
 OFFER_EXTRA_BLOCKED = [
@@ -116,11 +136,65 @@ CHROMIUM_ARGS = [
     "--blink-settings=imagesEnabled=false",  # дублирует BLOCKED_PATTERNS, но срезает до сети
     "--disable-http2",  # HTTP/2 keep-alive вызывает ERR_HTTP2_PING_FAILED
     "--no-proxy-server",  # игнорировать системный прокси (Happ/v2ray ставит system proxy)
+    # экономия RAM и CPU -- не нужны для парсинга
+    "--disable-gpu",
+    "--disable-dev-shm-usage",
+    "--disable-software-rasterizer",
+    "--disable-background-networking",
+    "--disable-sync",
+    "--disable-translate",
+    "--disable-notifications",
+    "--disable-default-apps",
+    "--disable-popup-blocking",
+    "--no-sandbox",
+    "--disable-infobars",
+    "--disable-session-crashed-bubble",
+    "--disable-features=TranslateUI",
+    "--metrics-recording-only",
+    "--mute-audio",
+]
+
+# для VPN-расширений: без --disable-component-extensions (убивает background page расширения)
+# и без --no-proxy-server (расширение маршрутизирует через chrome.proxy API)
+CHROMIUM_ARGS_VPN = [
+    a
+    for a in CHROMIUM_ARGS
+    if a
+    not in ("--disable-component-extensions-with-background-pages", "--no-proxy-server")
 ]
 
 _stealth = Stealth(
     navigator_languages_override=["ru-RU", "ru", "en-US", "en"],
 )
+
+# domrf: ServicePipe детектит --disable-http2, --disable-gpu, playwright_stealth
+# headed hidden (--window-position) вместо headless
+CHROMIUM_ARGS_DOMRF = [
+    "--disable-blink-features=AutomationControlled",
+    "--no-first-run",
+    "--no-default-browser-check",
+    "--window-position=-32000,-32000",
+    "--disable-dev-shm-usage",
+    "--disable-background-networking",
+    "--disable-sync",
+    "--disable-translate",
+    "--disable-notifications",
+    "--disable-default-apps",
+    "--disable-popup-blocking",
+    "--no-sandbox",
+    "--disable-infobars",
+    "--disable-session-crashed-bubble",
+    "--disable-features=TranslateUI",
+    "--metrics-recording-only",
+    "--mute-audio",
+]
+
+
+async def launch_domrf_browser(playwright) -> Browser:
+    return await playwright.chromium.launch(
+        headless=False,
+        args=CHROMIUM_ARGS_DOMRF,
+    )
 
 
 async def launch_stealth_browser(playwright, headless=False) -> Browser:
@@ -131,8 +205,12 @@ async def launch_stealth_browser(playwright, headless=False) -> Browser:
 
 
 async def create_stealth_context(
-    browser: Browser, proxy=None, identity: SessionIdentity = None,
-    user_agent=None, viewport=None,
+    browser: Browser,
+    proxy=None,
+    identity: SessionIdentity = None,
+    user_agent=None,
+    viewport=None,
+    storage_state=None,
 ) -> BrowserContext:
     ua = identity.user_agent if identity else (user_agent or random.choice(USER_AGENTS))
     vp = identity.viewport if identity else (viewport or random.choice(VIEWPORTS))
@@ -148,6 +226,8 @@ async def create_stealth_context(
     )
     if proxy:
         ctx_kwargs["proxy"] = proxy
+    if storage_state:
+        ctx_kwargs["storage_state"] = storage_state
 
     context = await browser.new_context(**ctx_kwargs)
     await _stealth.apply_stealth_async(context)
@@ -167,6 +247,13 @@ async def apply_cdp_blocking(page: Page, extra_patterns: Sequence[str] = ()):
         for pattern in patterns:
             await page.route(pattern, lambda route: route.abort())
         return None
+
+
+async def reset_cdp_blocking(client):
+    try:
+        await client.send("Network.setBlockedURLs", {"urls": []})
+    except Exception:
+        pass
 
 
 async def humanize(page: Page):
@@ -197,12 +284,183 @@ async def jittered_delay(min_s: float, max_s: float):
 
 async def warmup_session(page: Page):
     # визит на главную создает cookies и историю
+    # JS должен быть разрешен на этом этапе -- WAF-скрипты ставят cookies
     try:
-        await page.goto("https://www.cian.ru/", timeout=30000, wait_until="domcontentloaded")
-        await jittered_delay(2.0, 4.0)
+        await page.goto(
+            "https://www.cian.ru/", timeout=30000, wait_until="domcontentloaded"
+        )
+        await jittered_delay(3.0, 5.0)
         await humanize(page)
+        # ждём networkidle -- WAF-скрипты грузятся асинхронно
+        try:
+            await page.wait_for_load_state("networkidle", timeout=10000)
+        except Exception:
+            pass
     except Exception:
         pass
+
+
+async def _pick_first(page: Page, selector: str):
+    locator = page.locator(selector).first
+    if await locator.count() == 0:
+        return None
+    return locator
+
+
+async def dismiss_web_proxy_consent(page: Page):
+    selectors = [
+        "button[aria-label*='Accept']",
+        "button[title*='Accept']",
+        "button:has-text('Accept')",
+        "button:has-text('I Agree')",
+        "button:has-text('Consent')",
+        "[aria-label='Consent'] button",
+        ".fc-cta-consent",
+    ]
+    for selector in selectors:
+        try:
+            locator = page.locator(selector).first
+            if await locator.count() == 0:
+                continue
+            await locator.click(timeout=3000)
+            await asyncio.sleep(1)
+            return
+        except Exception:
+            continue
+
+
+async def _find_web_proxy_frame(page: Page, target_url: str | None = None):
+    target_host = ""
+    if target_url:
+        try:
+            target_host = urlparse(target_url).netloc.lower()
+        except Exception:
+            target_host = ""
+
+    for frame in page.frames:
+        if frame == page.main_frame:
+            continue
+        if target_host and target_host in frame.url.lower():
+            return frame
+
+    for frame in page.frames:
+        if frame == page.main_frame:
+            continue
+        try:
+            html = (await frame.content()).lower()
+        except Exception:
+            continue
+        if any(
+            mark in html for mark in ("cian", "циан", "price-amount", "cardcomponent")
+        ):
+            return frame
+
+    return None
+
+
+async def submit_web_proxy_target(page: Page, gateway_cfg: dict, target_url: str):
+    await page.goto(
+        gateway_cfg["landing_url"], timeout=30000, wait_until="domcontentloaded"
+    )
+    try:
+        await page.wait_for_load_state("networkidle", timeout=10000)
+    except Exception:
+        pass
+
+    await dismiss_web_proxy_consent(page)
+
+    input_box = await _pick_first(page, gateway_cfg["url_input_selector"])
+    if not input_box:
+        raise RuntimeError(f"url input not found: {gateway_cfg['url_input_selector']}")
+
+    await input_box.fill(target_url)
+
+    submit = await _pick_first(page, gateway_cfg["submit_selector"])
+    if submit:
+        await submit.click()
+    else:
+        await input_box.press("Enter")
+
+    await asyncio.sleep(gateway_cfg.get("settle_delay", 8))
+    try:
+        await page.wait_for_load_state("domcontentloaded", timeout=10000)
+    except Exception:
+        pass
+
+    frame = await _find_web_proxy_frame(page, target_url)
+    return frame
+
+
+class WebProxyPageAdapter:
+
+    def __init__(self, page: Page, gateway_cfg: dict):
+        self._page = page
+        self._cfg = gateway_cfg
+        self._frame = None
+        self._target_url = gateway_cfg.get("target_url")
+
+    @property
+    def context(self):
+        return self._page.context
+
+    @property
+    def url(self):
+        if self._frame and self._frame.url:
+            return self._frame.url
+        return self._page.url
+
+    @property
+    def frames(self):
+        return self._page.frames
+
+    @property
+    def mouse(self):
+        return self._page.mouse
+
+    @property
+    def viewport_size(self):
+        return self._page.viewport_size
+
+    async def goto(self, url, timeout=30000, wait_until="domcontentloaded"):
+        del timeout, wait_until
+        self._target_url = url
+        self._frame = await submit_web_proxy_target(self._page, self._cfg, url)
+        return None
+
+    async def title(self):
+        if self._frame:
+            try:
+                return await self._frame.title()
+            except Exception:
+                pass
+        return await self._page.title()
+
+    async def content(self):
+        target = self._frame or self._page
+        return await target.content()
+
+    async def query_selector(self, selector):
+        target = self._frame or self._page
+        return await target.query_selector(selector)
+
+    async def query_selector_all(self, selector):
+        target = self._frame or self._page
+        return await target.query_selector_all(selector)
+
+    async def wait_for_selector(self, selector, timeout=None):
+        target = self._frame or self._page
+        return await target.wait_for_selector(selector, timeout=timeout)
+
+    async def reload(self, timeout=30000):
+        await self._page.reload(timeout=timeout)
+        if self._target_url:
+            self._frame = await _find_web_proxy_frame(self._page, self._target_url)
+
+    async def wait_for_load_state(self, state="load", timeout=None):
+        return await self._page.wait_for_load_state(state, timeout=timeout)
+
+    async def wait_for_url(self, url, timeout=None):
+        return await self._page.wait_for_url(url, timeout=timeout)
 
 
 # ищем в HTML, если находим значит нарвались на капчу

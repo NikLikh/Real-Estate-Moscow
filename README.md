@@ -9,6 +9,7 @@ config/          конфиг проекта, .env, scraper.yaml
 db/              PostgreSQL: схема, пул, CRUD, загрузчики kaggle
 scraper/         парсеры cian.ru и наш.дом.рф
 notebooks/       Jupyter-ноутбуки (предобработка, анализ)
+tests/           юнит-тесты
 data/            гео-справочники (округа, районы, метро)
 jars/            Spark JDBC driver
 ```
@@ -47,7 +48,7 @@ python main.py load angultiaev      # загрузка angultiaev 162GB (remotez
 Парсер работает через direct IP из коробки. Для обхода rate limit можно подключить дополнительные endpoints, при запуске `auto_discover` проверит доступные и оставит уникальные IP:
 
 - **VLESS/V2Ray** - любой SOCKS5 прокси. Указать порт в `.env` (`VLESS_SOCKS_PORT`) и `config/scraper.yaml` (`vless_socks_port`)
-- **VDS SSH tunnel** - SOCKS5 через SSH. Указать `VDS_HOST`, `VDS_USER` в `.env`, туннель поднимется автоматически. Первый раз: `python -m tools.vds_tunnel setup`
+- **VDS SSH tunnel** - SOCKS5 через SSH. Указать `VDS_HOST`, `VDS_USER` в `.env`, туннель поднимется автоматически. Первый раз настроить SSH-ключ: `ssh-keygen -t ed25519 && ssh-copy-id user@host`
 
 Без прокси парсер будет работать медленнее из-за rate limit на один IP, но всё равно соберёт данные.
 

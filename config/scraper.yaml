@@ -1,16 +1,26 @@
 cian_base: "https://www.cian.ru/cat.php?deal_type=sale&engine_version=2&offer_type=flat"
 
-# при старте проверяет direct IP, VLESS SOCKS5, VDS SSH tunnel
-# оставляет только endpoints с уникальными IP
 auto_discover: true
 vless_socks_port: 10808
 vds_socks_port: 9080
+endpoint_preflight: true
+endpoint_preflight_retries: 2
+runtime_endpoint_types: [proxy]
+experimental_endpoint_types: [vpn_extension, web_proxy]
+
+endpoint_policies:
+  default:
+    network_cooldown: 20
+    captcha_cooldown: 30
+    quarantine_cooldown: 900
+    max_warming_failures: 2
+    max_quarantine_failures: 3
 
 # fallback если auto_discover: false
 endpoints:
   - name: direct
     proxy: null
-    rate_limit: 0.1
+    rate_limit: 2.0
 
 regions:
   msk:
@@ -23,6 +33,8 @@ regions:
       4-room: "room4=1"
       5+room: "room5=1&room6=1"
     prices:
+      - [3_000_000, 6_000_000]
+      - [6_000_000, 10_000_000]
       - [10_000_000, 15_000_000]
       - [15_000_000, 20_000_000]
       - [20_000_000, 30_000_000]
@@ -42,6 +54,8 @@ regions:
       3-room: "room3=1"
       4+room: "room4=1&room5=1&room6=1"
     prices:
+      - [3_000_000, 6_000_000]
+      - [6_000_000, 10_000_000]
       - [10_000_000, 15_000_000]
       - [15_000_000, 25_000_000]
       - [25_000_000, 50_000_000]
@@ -61,34 +75,87 @@ skip_phrases:
   - "доля в "
 
 headless: true
-browser_pool_size: 12
-max_concurrent: 8
-listing_workers: 2
-offer_workers: 4
-retry_workers: 2
+max_concurrent: 30
+browser_pool_cap: 3   # planner теперь через curl_cffi, browser только fallback
+planner_workers: 3
+listing_workers: 4
+listing_endpoint: direct
+offer_sessions_per_endpoint: 1
+retry_workers: 1
+vpn_headless: false
 
-# перезапуск browser context каждые N запросов для сброса fingerprint
-batch_size: 4
-batch_cooldown: [2, 4]
-listing_batch_size: 8
+batch_size: 20
+batch_cooldown: [5, 10]
+listing_batch_size: 12
 
-# при WAF меняем endpoint вместо длинных пауз
-waf_endpoint_cooldown: 5
+waf_endpoint_cooldown: 5  # при WAF меняем endpoint вместо длинных пауз
+
+# circuit breaker: N WAF за cb_window сек -> глобальная пауза
+cb_window: 30
+cb_threshold: 6
+cb_cooldown: 90
+
+# проактивный cooldown чтобы не дожидаться WAF-блока
+ip_budget: 9000
+ip_budget_cooldown: 300
 
 max_pages: 54
 url_queue_max: 300
-max_cached_pages: 3
+max_cached_pages: 54
 min_new_first_page: 5
-
-# дробим фильтр если count > max_offers_per_filter
-max_offers_per_filter: 1400
+max_offers_per_filter: 1000
 min_price_split: 500_000
 
+loop_pause: 60  # секунд между прогонами (ночной loop)
 max_restarts: 50
 restart_cooldown: 1800
 max_worker_crashes: 10
-memory_threshold_mb: 4000
+memory_threshold_mb: 12000
+
+# расширения автоскачиваются из Chrome Web Store
+vpn_extensions:
+  - extension: browsec
+    path: extensions/browsec
+    servers: [nl, uk, de, lt, lv, sg, us]
+    rate_limit: 2.0
+
+web_proxy_enabled: false
+web_proxy_candidates:
+  - name: croxyproxy
+    type: web_proxy
+    landing_url: "https://www.croxyproxy.com/"
+    target_url: "https://www.cian.ru/"
+    url_input_selector: "input[name='url'], input[type='text']"
+    submit_selector: "button[type='submit'], input[type='submit']"
 
 captcha_service: null
 captcha_api_key: null
 captcha_long_pause: [15, 30]
+
+# curl_cffi offer/listing workers, параллельно с browser crawl
+http_listing_workers: 10
+http_offer_workers: 15
+http_per_slot_concurrency: 5
+http_rate_per_slot: 3.0  # req/s на слот: 0.5 = 5ч lifetime, 1.0 = 2.5ч, 3.0 = 50мин
+http_timeout: 15
+http_retry_max: 3
+free_proxy_discovery: false
+proxy_refresh_interval: 600
+
+domrf:
+  base_url: "https://xn--80az8a.xn--d1aqf.xn--p1ai"
+  listing_path: "/%D1%81%D0%B5%D1%80%D0%B2%D0%B8%D1%81%D1%8B/%D0%BA%D0%B0%D1%82%D0%B0%D0%BB%D0%BE%D0%B3-%D0%BA%D0%B2%D0%B0%D1%80%D1%82%D0%B8%D1%80/%D1%81%D0%BF%D0%B8%D1%81%D0%BE%D0%BA"
+  regions:
+    moscow:
+      place: "0-1"
+      max_pages: 800
+    mo:
+      place: "50"
+      max_pages: 800
+  flat_status: "free,booked"
+  listing_workers: 4
+  offer_workers: 4
+  batch_size: 50
+  listing_delay: [0.3, 0.8]
+  offer_delay: [0.5, 1.0]
+  auto_discover_proxies: true

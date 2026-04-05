@@ -1,0 +1,417 @@
+"""VPN Chrome-расширения как endpoint'ы для ротации IP."""
+
+import asyncio
+import io
+import logging
+import shutil
+import tempfile
+import urllib.request
+import zipfile
+from pathlib import Path
+
+from playwright_stealth import Stealth
+
+from scraper.browser import CHROMIUM_ARGS_VPN, SessionIdentity
+
+log = logging.getLogger("re")
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+_stealth = Stealth(
+    navigator_languages_override=["ru-RU", "ru", "en-US", "en"],
+)
+
+# Chrome Web Store CRX download -- публичный API обновления расширений
+_CWS_URL = (
+    "https://clients2.google.com/service/update2/crx"
+    "?response=redirect&prodversion=136.0&acceptformat=crx2,crx3"
+    "&x=id%3D{ext_id}%26uc"
+)
+
+# реестр расширений: ID в Web Store, JS для управления подключением
+EXTENSIONS = {
+    "browsec": {
+        "webstore_id": "omghfjlpggmjjaagoclmmobgdodcjboh",
+        # proxy.setSingleServer() -- единственный рабочий способ активировать VPN
+        # читаем серверы из lowLevelPac.countries.{country}, берем рандомный
+        "connect_js": """async (country) => {
+            const items = await new Promise(r => chrome.storage.local.get('lowLevelPac', r));
+            const pac = items['lowLevelPac'];
+            if (!pac || !pac.countries) return 'no PAC data';
+
+            const servers = pac.countries[country];
+            if (!servers || !servers.length) return 'no servers for ' + country;
+
+            const idx = Math.floor(Math.random() * servers.length);
+            const raw = servers[idx];
+            const server = raw.replace(/^HTTPS /, '').replace(/^HTTP /, '');
+            await proxy.setSingleServer(server);
+            return server;
+        }""",
+        "check_connected_js": """async () => {
+            const pac = await proxy.getPac();
+            return pac !== '' && pac !== null;
+        }""",
+    },
+    "cyberghost": {
+        "webstore_id": "ffbkglfijbcbgblgflchnbphjdllaogb",
+        # серверы в статическом assets/server_list.json, browser launch не нужен
+        # nodes работают как HTTPS CONNECT proxy на порту 9002
+        # 4 страны (RO, NL, DE, US), ~36 уникальных IP
+    },
+    # urban_vpn: popup рендерит SPA, не инициализируется без UI. сложная DI-архитектура,
+    #   connect через внутренний message bus, серверы через remote API (planetProvider)
+    # windscribe: требует аккаунт (login), 10GB/мес free
+    # оба не годятся для безаккаунтной автоматизации
+}
+
+# temp dirs для persistent context, чистим при shutdown
+_temp_dirs = []
+
+
+def _make_temp_dir(label):
+    d = Path(tempfile.mkdtemp(prefix=f"vpn_{label}_"))
+    _temp_dirs.append(d)
+    return d
+
+
+def cleanup_temp_dirs():
+    for d in _temp_dirs:
+        try:
+            shutil.rmtree(d, ignore_errors=True)
+        except Exception:
+            pass
+    _temp_dirs.clear()
+
+
+def download_extension(ext_name):
+    """скачивает CRX из Chrome Web Store и распаковывает в extensions/{ext_name}/"""
+    ext_cfg = EXTENSIONS.get(ext_name)
+    if not ext_cfg or "webstore_id" not in ext_cfg:
+        raise ValueError(f"no webstore_id for extension: {ext_name}")
+
+    dest = PROJECT_ROOT / "extensions" / ext_name
+    if (dest / "manifest.json").exists():
+        return dest  # уже есть
+
+    url = _CWS_URL.format(ext_id=ext_cfg["webstore_id"])
+    log.info(f"[VPN] downloading {ext_name} from Chrome Web Store...")
+
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    resp = urllib.request.urlopen(req, timeout=30)
+    crx_data = resp.read()
+
+    if not crx_data[:4] == b"Cr24":
+        raise ValueError(f"downloaded file is not a valid CRX (got {crx_data[:20]})")
+
+    # распаковываем CRX -> extensions/{ext_name}/
+    pk_offset = crx_data.find(b"PK\x03\x04")
+    if pk_offset < 0:
+        raise ValueError("CRX does not contain ZIP data")
+
+    dest.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(io.BytesIO(crx_data[pk_offset:])) as zf:
+        zf.extractall(dest)
+
+    log.info(f"[VPN] {ext_name} unpacked to {dest}")
+    return dest
+
+
+def ensure_extensions(cfg):
+    for vs in cfg.get("vpn_extensions", []):
+        ext_name = vs["extension"]
+        cfg_path = vs.get("path")
+
+        if find_extension_path(ext_name, cfg_path=cfg_path):
+            log.info(f"[VPN] {ext_name}: found")
+            continue
+
+        if ext_name in EXTENSIONS and "webstore_id" in EXTENSIONS[ext_name]:
+            try:
+                download_extension(ext_name)
+            except Exception as e:
+                log.error(f"[VPN] failed to download {ext_name}: {e}")
+        else:
+            log.warning(f"[VPN] {ext_name}: not found and no auto-download available")
+
+
+def unpack_crx(crx_path, dest_dir):
+    """CRX v2/v3 -- zip с заголовком. Пробуем как zip, если не выходит -- пропускаем заголовок."""
+    crx_path = Path(crx_path)
+    dest_dir = Path(dest_dir)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+
+    # сначала пробуем как обычный zip (иногда CRX уже переименованный zip)
+    try:
+        with zipfile.ZipFile(crx_path) as zf:
+            zf.extractall(dest_dir)
+            return dest_dir
+    except zipfile.BadZipFile:
+        pass
+
+    # CRX3: magic (4 bytes) + version (4) + header_size (4) + header
+    data = crx_path.read_bytes()
+    # ищем PK сигнатуру zip
+    pk_offset = data.find(b"PK\x03\x04")
+    if pk_offset < 0:
+        raise ValueError(f"not a valid CRX/ZIP: {crx_path}")
+
+    with zipfile.ZipFile(io.BytesIO(data[pk_offset:])) as zf:
+        zf.extractall(dest_dir)
+    return dest_dir
+
+
+def find_extension_path(ext_name, cfg_path=None):
+    if cfg_path:
+        p = Path(cfg_path)
+        if not p.is_absolute():
+            p = PROJECT_ROOT / p
+        if (p / "manifest.json").exists():
+            return p
+
+    default = PROJECT_ROOT / "extensions" / ext_name
+    if (default / "manifest.json").exists():
+        return default
+
+    return None
+
+
+async def _find_ext_worker(ctx, ext_name, timeout=15):
+    # MV2 = background pages, MV3 = service workers
+    deadline = asyncio.get_event_loop().time() + timeout
+
+    while asyncio.get_event_loop().time() < deadline:
+        # MV2: background pages
+        for page in ctx.background_pages:
+            if ext_name in page.url.lower() or "chrome-extension://" in page.url:
+                return page
+
+        # MV3: service workers
+        workers = ctx.service_workers if hasattr(ctx, "service_workers") else []
+        for sw in workers:
+            if "chrome-extension://" in sw.url:
+                return sw
+
+        await asyncio.sleep(0.5)
+
+    # fallback
+    if ctx.background_pages:
+        return ctx.background_pages[0]
+    workers = ctx.service_workers if hasattr(ctx, "service_workers") else []
+    if workers:
+        return workers[0]
+    return None
+
+
+async def _activate_browsec(ctx, ext_name):
+    # закрываем onboarding-табы (клики по ним крашат browser)
+    for page in ctx.pages[1:]:
+        try:
+            await page.close()
+        except Exception:
+            pass
+
+
+async def _wait_for_pac(bg, ext_name, timeout=15):
+    deadline = asyncio.get_event_loop().time() + timeout
+    while asyncio.get_event_loop().time() < deadline:
+        try:
+            has_pac = await bg.evaluate("""async () => {
+                const items = await new Promise(r => chrome.storage.local.get('lowLevelPac', r));
+                const pac = items['lowLevelPac'];
+                return !!(pac && pac.countries && Object.keys(pac.countries).length > 0);
+            }""")
+            if has_pac:
+                return True
+        except Exception:
+            pass
+        await asyncio.sleep(1)
+    log.warning(f"[VPN] {ext_name}: PAC data not loaded after {timeout}s")
+    return False
+
+
+async def get_available_countries(bg, ext_name):
+    try:
+        countries = await bg.evaluate("""async () => {
+            const items = await new Promise(r => chrome.storage.local.get('lowLevelPac', r));
+            const pac = items['lowLevelPac'];
+            if (!pac || !pac.countries) return [];
+            return Object.keys(pac.countries);
+        }""")
+        return countries or []
+    except Exception as e:
+        log.warning(f"[VPN] {ext_name}: failed to read countries: {e}")
+        return []
+
+
+async def launch_vpn_context(pw, ext_name, server_id, identity=None, headless=False, cfg_path=None):
+    """запускает persistent context с VPN-расширением, подключает к серверу.
+    возвращает (context, bg_page) или райзит если расширение не загрузилось."""
+    identity = identity or SessionIdentity()
+
+    ext_cfg = EXTENSIONS.get(ext_name)
+    if not ext_cfg:
+        raise ValueError(f"unknown VPN extension: {ext_name}")
+
+    ext_path = find_extension_path(ext_name, cfg_path=cfg_path)
+    if not ext_path:
+        raise FileNotFoundError(
+            f"extension '{ext_name}' not found in extensions/{ext_name}/ "
+            f"(need unpacked CRX with manifest.json)"
+        )
+
+    user_data_dir = _make_temp_dir(f"{ext_name}_{server_id}")
+
+    args = list(CHROMIUM_ARGS_VPN) + [
+        f"--disable-extensions-except={ext_path}",
+        f"--load-extension={ext_path}",
+    ]
+
+    # --headless=new экспериментально поддерживает расширения (Chromium 112+)
+    # если не работает -- fallback на headless=False (вызывающий код решает)
+    vp = {"width": 800, "height": 600} if headless else identity.viewport
+    ctx = await pw.chromium.launch_persistent_context(
+        user_data_dir=str(user_data_dir),
+        headless=headless,
+        args=args,
+        user_agent=identity.user_agent,
+        viewport=vp,
+        locale="ru-RU",
+        timezone_id="Europe/Moscow",
+        color_scheme="light",
+        device_scale_factor=identity.scale,
+    )
+    await _stealth.apply_stealth_async(ctx)
+
+    # Browsec показывает onboarding: "Принять" -> "Включить VPN"
+    # без этих кликов расширение не активируется и lowLevelPac пустой
+    await asyncio.sleep(2)
+    await _activate_browsec(ctx, ext_name)
+
+    # ждем background page (MV2) или service worker (MV3)
+    bg = await _find_ext_worker(ctx, ext_name)
+    if not bg:
+        log.warning(f"[VPN] {ext_name}: background page not found, extension may not work")
+        return ctx, None
+
+    if not ext_cfg.get("connect_js"):
+        log.warning(f"[VPN] {ext_name}: no connect_js, extension needs manual research")
+        return ctx, bg
+
+    # принимаем consent через storage (без кликов по UI)
+    try:
+        await bg.evaluate("""async () => {
+            await new Promise(r => chrome.storage.local.set({
+                'agreed': true, 'termsAccepted': true,
+                'onboardingCompleted': true, 'consent': true
+            }, r));
+        }""")
+    except Exception:
+        pass
+
+    # ждем пока PAC данные загрузятся
+    await _wait_for_pac(bg, ext_name, timeout=15)
+
+    try:
+        result = await bg.evaluate(ext_cfg["connect_js"], server_id)
+        log.info(f"[VPN] {ext_name}/{server_id}: connected via {result}")
+    except Exception as e:
+        log.warning(f"[VPN] {ext_name}/{server_id}: connect failed: {e}")
+
+    await asyncio.sleep(3)
+
+    ip = await check_vpn_ip(ctx)
+    if ip:
+        log.info(f"[VPN] {ext_name}/{server_id}: IP = {ip}")
+    else:
+        log.warning(f"[VPN] {ext_name}/{server_id}: could not verify IP")
+
+    return ctx, bg
+
+
+async def discover_vpn_servers(pw, ext_name, cfg_path=None):
+    # для servers: auto в конфиге
+    identity = SessionIdentity()
+    ext_cfg = EXTENSIONS.get(ext_name)
+    if not ext_cfg:
+        return []
+
+    ext_path = find_extension_path(ext_name, cfg_path=cfg_path)
+    if not ext_path:
+        return []
+
+    user_data_dir = _make_temp_dir(f"{ext_name}_discover")
+    args = list(CHROMIUM_ARGS_VPN) + [
+        f"--disable-extensions-except={ext_path}",
+        f"--load-extension={ext_path}",
+    ]
+
+    ctx = None
+    try:
+        ctx = await pw.chromium.launch_persistent_context(
+            user_data_dir=str(user_data_dir),
+            headless=False,
+            args=args,
+            user_agent=identity.user_agent,
+            viewport=identity.viewport,
+            locale="ru-RU",
+            timezone_id="Europe/Moscow",
+        )
+        await _stealth.apply_stealth_async(ctx)
+
+        await asyncio.sleep(2)
+        await _activate_browsec(ctx, ext_name)
+
+        bg = await _find_ext_worker(ctx, ext_name)
+        countries = []
+        if bg:
+            await _wait_for_pac(bg, ext_name, timeout=15)
+            countries = await get_available_countries(bg, ext_name)
+            log.info(f"[VPN] {ext_name}: {len(countries)} countries available: {countries}")
+
+        return countries
+    except Exception as e:
+        log.warning(f"[VPN] {ext_name}: discover failed: {e}")
+        return []
+    finally:
+        if ctx:
+            try:
+                await ctx.close()
+            except Exception:
+                pass
+
+
+async def switch_vpn_server(bg, ext_name, server_id):
+    # без перезапуска browser (~1-3с вместо ~15с)
+    ext_cfg = EXTENSIONS.get(ext_name)
+    if not ext_cfg:
+        raise ValueError(f"unknown VPN extension: {ext_name}")
+    result = await bg.evaluate(ext_cfg["connect_js"], server_id)
+    await asyncio.sleep(2)  # дать расширению подключиться
+    return result
+
+
+async def check_vpn_ip(ctx, timeout=10000):
+    # ipify а не httpbin, т.к. httpbin не всегда проходит через PAC proxy
+    page = await ctx.new_page()
+    try:
+        await page.goto("https://api.ipify.org", timeout=timeout)
+        text = (await page.inner_text("body")).strip()
+        if text and "." in text:
+            return text
+    except Exception as e:
+        log.debug(f"[VPN] ip check via ipify failed: {e}")
+    # fallback на ifconfig.me
+    try:
+        await page.goto("https://ifconfig.me/ip", timeout=timeout)
+        text = (await page.inner_text("body")).strip()
+        if text and "." in text:
+            return text
+    except Exception as e:
+        log.debug(f"[VPN] ip check via ifconfig failed: {e}")
+    finally:
+        try:
+            await page.close()
+        except Exception:
+            pass
+    return None

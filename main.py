@@ -9,7 +9,8 @@ def main():
 
     scrape = sub.add_parser("scrape", help="запуск скраперов")
     scrape_sub = scrape.add_subparsers(dest="target")
-    scrape_sub.add_parser("cian", help="вторичка и новостройки с cian.ru")
+    cian_parser = scrape_sub.add_parser("cian", help="вторичка и новостройки с cian.ru")
+    cian_parser.add_argument("--once", action="store_true", help="один прогон без loop")
     scrape_sub.add_parser("domrf", help="новостройки с наш.дом.рф")
 
     load = sub.add_parser("load", help="загрузка датасетов в БД")
@@ -22,11 +23,15 @@ def main():
     # ленивые импорты, чтобы не тянуть тяжелые зависимости пока не нужны
     if args.command == "scrape":
         if args.target == "cian":
-            from scraper.cian import main as cian_main
-            asyncio.run(cian_main())
+            if getattr(args, "once", False):
+                from scraper.cian import main as cian_main
+                asyncio.run(cian_main())
+            else:
+                from scraper.cian import main_loop
+                asyncio.run(main_loop())
         elif args.target == "domrf":
             from scraper.domrf import main as domrf_main
-            domrf_main()
+            asyncio.run(domrf_main())
         else:
             scrape.print_help()
 

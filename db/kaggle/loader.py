@@ -79,11 +79,11 @@ def _building_type_expr():
 def _create_spark():
     return (
         SparkSession.builder.appName("kaggle_loader")
-        .master("local[*]")
+        .master("local[4]")
         .config("spark.jars", JARS_PATH)
         .config("spark.driver.extraClassPath", JARS_PATH)
         .config("spark.executor.extraClassPath", JARS_PATH)
-        .config("spark.driver.memory", "4g")
+        .config("spark.driver.memory", "6g")
         .getOrCreate()
     )
 

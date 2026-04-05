@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import random
 import time
 from datetime import datetime
 
@@ -11,30 +12,31 @@ from patchright.async_api import async_playwright
 from config.settings import load_scraper_config
 from db.repository import get_cached_urls, save_rows
 from scraper.browser import (
-    OFFER_EXTRA_BLOCKED,
     AdaptiveDelay,
-    SessionIdentity,
-    apply_cdp_blocking,
-    create_stealth_context,
     detect_captcha,
     detect_vpn_block,
     detect_waf_rate_limit,
-    handle_captcha,
-    handle_vpn_block,
     humanize,
     jittered_delay,
     launch_browser_pool,
-    warmup_session,
 )
+from scraper.http_offers import build_http_pool, run_http_listings, run_http_workers
 from scraper.parsers import parse_offer_page
-from scraper.planner import build_filters_from_config, plan_filters
-from scraper.proxy import ProxyPool, auto_discover, ensure_vds_tunnel, stop_vds_tunnel
+from scraper.planner import build_filters_from_config, http_plan_filters, plan_filters
+from scraper.proxy import ensure_vds_tunnel, resolve_runtime_endpoints, stop_vds_tunnel
+from scraper.vpn_ext import cleanup_temp_dirs
 from scraper.runtime import (
+    EndpointEvent,
+    EndpointOrchestrator,
+    EndpointRegistry,
+    EndpointSession,
+    build_runtime_session_plan,
     clear_checkpoint,
     install_shutdown_handler,
     is_restarting,
     is_shutting_down,
     load_checkpoint,
+    queue_snapshot,
     request_restart,
     reset_restart,
     save_checkpoint,
@@ -44,157 +46,14 @@ from scraper.runtime import (
 
 log = logging.getLogger("re")
 
-# при этих ошибках HTTP/2 соединение мертво, нужна ротация контекста
-NETWORK_ERRORS = (
-    "ERR_CONNECTION_TIMED_OUT",
-    "ERR_HTTP2_PING_FAILED",
-    "ERR_CONNECTION_RESET",
-    "ERR_CONNECTION_CLOSED",
-    "ERR_NETWORK_CHANGED",
-    "ERR_SOCKET_NOT_CONNECTED",
-)
-
-
-async def throttled_goto(page, url, sem, timeout=120000, throttle=None):
-    # goto через семафор + rate limiter, возвращает (ok, dt)
-    if throttle:
-        await throttle.wait()
-    async with sem:
-        t0 = time.monotonic()
-        try:
-            await page.goto(url, timeout=timeout, wait_until="domcontentloaded")
-            return True, time.monotonic() - t0
-        except Exception as e:
-            msg = str(e)
-            log.debug(f"    goto failed: {msg[:60]}")
-            dt = time.monotonic() - t0
-            if any(err in msg for err in NETWORK_ERRORS):
-                return "network", dt
-            return False, dt
-
-
-async def _check_page(page, delay) -> bool:
-    if not await handle_vpn_block(page):
-        return False
-    if not await handle_captcha(page):
-        delay.report_captcha()
-        return False
-    return True
-
-
-async def _make_context(browser, block_extra=False, endpoint=None, identity=None, do_warmup=True):
-    proxy = endpoint.get("proxy") if endpoint else None
-    ctx = await create_stealth_context(browser, proxy=proxy, identity=identity)
-    # без referer прямой визит offer-страницы палит бота
-    await ctx.set_extra_http_headers({
-        "Referer": "https://www.cian.ru/cat.php?deal_type=sale&engine_version=2&offer_type=flat",
-    })
-    page = await ctx.new_page()
-    extra = OFFER_EXTRA_BLOCKED if block_extra else ()
-    cdp = await apply_cdp_blocking(page, extra_patterns=extra)
-    if do_warmup:
-        await warmup_session(page)
-    return ctx, page, cdp
-
-
-async def _handle_offer_captcha(name, ctx, url, throttle=None):
-    # решаем капчу во временной странице с JS, cookies обновляются в контексте
-    if throttle:
-        await throttle.wait()
-    cap_page = await ctx.new_page()
-    await apply_cdp_blocking(cap_page)
-    try:
-        await cap_page.goto(url, timeout=30000, wait_until="domcontentloaded")
-        ok = await handle_captcha(cap_page)
-        if ok:
-            log.info(f"[{name}] captcha solved via temp page")
-        return ok
-    except Exception as e:
-        log.debug(f"[{name}] captcha temp page failed: {e}")
-        return False
-    finally:
-        try:
-            await cap_page.close()
-        except Exception:
-            pass
-
-
-async def _close_ctx(ctx, page):
-    try:
-        await page.close()
-    except Exception:
-        pass
-    try:
-        await ctx.close()
-    except Exception:
-        pass
-
-
-class EndpointSession:
-    """browser context + endpoint, ротация при WAF/network/captcha"""
-
-    def __init__(self, name, browser, pool, *, block_extra=True, identity=None):
-        self.name = name
-        self._browser = browser
-        self._pool = pool
-        self._block_extra = block_extra
-        self._identity = identity or SessionIdentity()
-        self.ctx = None
-        self.page = None
-        self.cdp = None
-        self.ep = pool.get_endpoint() if pool else {"name": "direct", "proxy": None, "throttle": None}
-        self.throttle = self.ep.get("throttle")
-        self._req_count = 0
-
-    async def open(self):
-        self.ctx, self.page, self.cdp = await _make_context(
-            self._browser, block_extra=self._block_extra,
-            endpoint=self.ep, identity=self._identity,
-        )
-        self._req_count = 0
-
-    async def close(self):
-        if self.ctx and self.page:
-            await _close_ctx(self.ctx, self.page)
-
-    async def rotate(self, reason=""):
-        # смена endpoint + перезапуск контекста
-        await self.close()
-        if self._pool:
-            self.ep = self._pool.get_endpoint()
-        self.throttle = self.ep.get("throttle")
-        if reason:
-            log.info(f"[{self.name}] {reason}, rotating to {self.ep['name']}")
-        await self.open()
-
-    async def restart_batch(self, cooldown):
-        # перезапуск контекста на том же endpoint
-        await self.close()
-        await jittered_delay(*cooldown)
-        await self.open()
-
-    def tick(self):
-        self._req_count += 1
-
-    async def maybe_restart_batch(self, batch_size, cooldown):
-        self._req_count += 1
-        if self._req_count > batch_size:
-            log.info(f"[{self.name}] batch done ({batch_size}), restarting context")
-            await self.restart_batch(cooldown)
-
-    async def goto(self, url, sem, timeout=30000):
-        return await throttled_goto(self.page, url, sem, timeout=timeout, throttle=self.throttle)
-
-    async def handle_captcha(self, url):
-        return await _handle_offer_captcha(self.name, self.ctx, url, self.throttle)
-
-    def report_waf(self):
-        if self._pool:
-            self._pool.report_waf(self.ep["name"])
-
-    def report_success(self):
-        if self._pool:
-            self._pool.report_success(self.ep["name"])
+def _format_slot_plan(names, registry):
+    if not names:
+        return "-"
+    parts = []
+    for i, name in enumerate(names):
+        ep = registry.get(name).endpoint_dict()
+        parts.append(f"{i + 1}:{name}[{ep['slot_class']}]")
+    return ", ".join(parts)
 
 
 async def supervised(name, coro_factory, max_crashes):
@@ -216,13 +75,14 @@ async def supervised(name, coro_factory, max_crashes):
 
 
 async def crawl_listings(
-    name, browser, filters, url_queue, seen, sem, completed, delay, stats, cfg, pool=None, stagger=0,
+    name, browser, filters, url_queue, seen, sem, completed, delay, stats, cfg,
+    orchestrator=None, stagger=0, endpoint_name=None, pw=None, shared=False,
 ):
     # ходит по листингам и собирает url-ы офферов в очередь
     max_pages = cfg.get("max_pages", 54)
     max_cached = cfg.get("max_cached_pages", 3)
     min_new = cfg.get("min_new_first_page", 5)
-    n_offer = cfg.get("offer_workers", 8)
+    n_offer = cfg.get("_runtime_offer_slots") or cfg.get("offer_workers", 8)
     skip_urls = cfg.get("skip_url_parts", [])
     skip_phrases = cfg.get("skip_phrases", [])
     listing_batch = cfg.get("listing_batch_size", 5)
@@ -231,7 +91,10 @@ async def crawl_listings(
     if stagger:
         await asyncio.sleep(stagger)
 
-    s = EndpointSession(name, browser, pool)
+    s = EndpointSession(
+        name, "listing", browser, orchestrator, prefer_name=endpoint_name, pw=pw, cfg=cfg,
+        shared=shared,
+    )
     await s.open()
     consecutive_failed_filters = 0
     consecutive_waf = 0
@@ -263,9 +126,10 @@ async def crawl_listings(
                 await s.maybe_restart_batch(listing_batch, batch_cooldown)
 
                 # backpressure
-                threshold = 5 * n_offer
-                while url_queue.qsize() > threshold and not should_stop():
-                    await asyncio.sleep(2)
+                if not cfg.get("_serial_offer_phase"):
+                    threshold = 5 * n_offer
+                    while url_queue.qsize() > threshold and not should_stop():
+                        await asyncio.sleep(2)
 
                 if delay.under_pressure:
                     await jittered_delay(3.0, 6.0)
@@ -275,7 +139,7 @@ async def crawl_listings(
 
                 result, _ = await s.goto(url, sem)
                 if result == "network":
-                    await s.rotate("network error")
+                    await s.rotate(EndpointEvent.NETWORK, "network error")
                     consecutive_page_fails += 1
                     await jittered_delay(3.0, 6.0)
                     continue
@@ -285,18 +149,36 @@ async def crawl_listings(
 
                 if await detect_waf_rate_limit(s.page):
                     stats["waf_blocks"] = stats.get("waf_blocks", 0) + 1
-                    consecutive_waf += 1
-                    log.warning(f"[{name}] WAF #{consecutive_waf} on {s.ep['name']}")
-                    s.report_waf()
-                    if consecutive_waf >= 6:
-                        request_restart(f"WAF x{consecutive_waf}")
-                        break
-                    await s.rotate()
-                    await jittered_delay(2.0, 5.0)
-                    continue
+                    recovered = False
+                    if await detect_captcha(s.page, url_only=True):
+                        stats["captchas"] += 1
+                        delay.captcha_enter()
+                        try:
+                            ok = await s.handle_captcha(url)
+                        finally:
+                            delay.captcha_exit()
+                        if ok:
+                            result, _ = await s.goto(url, sem)
+                            recovered = (
+                                result and
+                                not await detect_waf_rate_limit(s.page) and
+                                not await detect_captcha(s.page, url_only=True)
+                            )
+                    if recovered:
+                        consecutive_waf = 0
+                        await s.report_waf_resolved()
+                    else:
+                        consecutive_waf += 1
+                        log.warning(f"[{name}] WAF #{consecutive_waf} on {s.ep['name']}")
+                        if consecutive_waf >= 6:
+                            request_restart(f"WAF x{consecutive_waf}")
+                            break
+                        await s.rotate(EndpointEvent.WAF, "waf")
+                        await jittered_delay(2.0, 5.0)
+                        continue
 
                 consecutive_waf = 0
-                s.report_success()
+                await s.report_success()
 
                 if await detect_captcha(s.page, url_only=True):
                     delay.captcha_enter()
@@ -311,12 +193,12 @@ async def crawl_listings(
                             continue
                     else:
                         consecutive_page_fails += 1
-                        await s.rotate("captcha failed")
+                        await s.rotate(EndpointEvent.CAPTCHA, "captcha failed")
                         await delay.wait()
                         continue
 
                 if await detect_vpn_block(s.page):
-                    await s.rotate("VPN block")
+                    await s.rotate(EndpointEvent.NETWORK, "VPN block")
                     consecutive_page_fails += 1
                     await jittered_delay(3.0, 6.0)
                     continue
@@ -398,7 +280,6 @@ async def crawl_listings(
             if filter_ok:
                 consecutive_failed_filters = 0
                 completed.append(label)
-                save_checkpoint("cian", {"completed_filters": completed})
                 log.info(f"[{name}] DONE: {label} ({len(completed)} filters total)")
             else:
                 consecutive_failed_filters += 1
@@ -480,14 +361,17 @@ async def _parse_and_save(name, page, url, row_queue, stats, t_start=None, goto_
 
 
 async def parse_offers(
-    name, browser, url_queue, retry_queue, row_queue, sem, delay, stats, cfg, pool=None, stagger=0,
+    name, browser, url_queue, retry_queue, row_queue, sem, delay, stats, cfg,
+    orchestrator=None, stagger=0, endpoint_name=None, pw=None,
 ):
     if stagger:
         await asyncio.sleep(stagger)
 
     batch_size = cfg.get("batch_size", 25)
     batch_cooldown = cfg.get("batch_cooldown", [2.0, 4.0])
-    s = EndpointSession(name, browser, pool)
+    s = EndpointSession(
+        name, "offer", browser, orchestrator, prefer_name=endpoint_name, pw=pw, cfg=cfg
+    )
     await s.open()
     consecutive_waf = 0
 
@@ -515,7 +399,7 @@ async def parse_offers(
             result, goto_dt = await s.goto(url, sem)
             if result == "network":
                 stats["network_errors"] = stats.get("network_errors", 0) + 1
-                await s.rotate("network error")
+                await s.rotate(EndpointEvent.NETWORK, "network error")
                 await retry_queue.put(url)
                 await jittered_delay(2.0, 4.0)
                 continue
@@ -526,19 +410,37 @@ async def parse_offers(
 
             if await detect_waf_rate_limit(s.page):
                 stats["waf_blocks"] = stats.get("waf_blocks", 0) + 1
-                consecutive_waf += 1
-                log.warning(f"[{name}] WAF #{consecutive_waf} on {s.ep['name']}")
-                await url_queue.put(url)
-                s.report_waf()
-                if consecutive_waf >= 6:
-                    request_restart(f"WAF x{consecutive_waf}")
-                    break
-                await s.rotate()
-                await jittered_delay(2.0, 5.0)
-                continue
+                recovered = False
+                if await detect_captcha(s.page, url_only=True):
+                    stats["captchas"] += 1
+                    delay.captcha_enter()
+                    try:
+                        ok = await s.handle_captcha(url)
+                    finally:
+                        delay.captcha_exit()
+                    if ok:
+                        result, goto_dt = await s.goto(url, sem)
+                        recovered = (
+                            result and
+                            not await detect_waf_rate_limit(s.page) and
+                            not await detect_captcha(s.page, url_only=True)
+                        )
+                if recovered:
+                    consecutive_waf = 0
+                    await s.report_waf_resolved()
+                else:
+                    consecutive_waf += 1
+                    log.warning(f"[{name}] WAF #{consecutive_waf} on {s.ep['name']}")
+                    await url_queue.put(url)
+                    if consecutive_waf >= 6:
+                        request_restart(f"WAF x{consecutive_waf}")
+                        break
+                    await s.rotate(EndpointEvent.WAF, "waf")
+                    await jittered_delay(2.0, 5.0)
+                    continue
 
             consecutive_waf = 0
-            s.report_success()
+            await s.report_success()
 
             t_check = time.monotonic()
             if await detect_captcha(s.page, url_only=True):
@@ -554,11 +456,15 @@ async def parse_offers(
                         await retry_queue.put(url)
                         continue
                 else:
-                    await s.rotate("captcha failed")
+                    await s.rotate(EndpointEvent.CAPTCHA, "captcha failed")
                     await retry_queue.put(url)
                     await jittered_delay(2.0, 4.0)
                     continue
             check_dt = time.monotonic() - t_check
+
+            # имитация чтения страницы, WAF может трекать dwell time
+            if random.random() < 0.3:
+                await humanize(s.page)
 
             await _parse_and_save(
                 name, s.page, url, row_queue, stats, t_start, goto_dt, check_dt
@@ -579,7 +485,10 @@ async def parse_offers(
         await s.close()
 
 
-async def retry_offers(name, browser, retry_queue, url_queue, row_queue, sem, delay, stats, pool=None, stagger=0, cfg=None):
+async def retry_offers(
+    name, browser, retry_queue, url_queue, row_queue, sem, delay, stats,
+    orchestrator=None, stagger=0, cfg=None, endpoint_name=None, pw=None,
+):
     if stagger:
         await asyncio.sleep(stagger)
 
@@ -587,7 +496,9 @@ async def retry_offers(name, browser, retry_queue, url_queue, row_queue, sem, de
     batch_size = cfg.get("batch_size", 25)
     batch_cooldown = cfg.get("batch_cooldown", [2.0, 4.0])
 
-    s = EndpointSession(name, browser, pool)
+    s = EndpointSession(
+        name, "retry", browser, orchestrator, prefer_name=endpoint_name, pw=pw, cfg=cfg
+    )
     await s.open()
     consecutive_fails = 0
     consecutive_waf = 0
@@ -621,7 +532,7 @@ async def retry_offers(name, browser, retry_queue, url_queue, row_queue, sem, de
             result, goto_dt = await s.goto(url, sem)
             if result == "network":
                 stats["network_errors"] = stats.get("network_errors", 0) + 1
-                await s.rotate("network error")
+                await s.rotate(EndpointEvent.NETWORK, "network error")
                 consecutive_fails = 0
                 await jittered_delay(3.0, 6.0)
                 continue
@@ -629,26 +540,44 @@ async def retry_offers(name, browser, retry_queue, url_queue, row_queue, sem, de
                 consecutive_fails += 1
                 stats["skipped"] += 1
                 if consecutive_fails >= 5:
-                    await s.rotate(f"{consecutive_fails} fails")
+                    await s.rotate(EndpointEvent.NETWORK, f"{consecutive_fails} fails")
                     consecutive_fails = 0
                     await jittered_delay(5.0, 10.0)
                 continue
 
             if await detect_waf_rate_limit(s.page):
                 stats["waf_blocks"] = stats.get("waf_blocks", 0) + 1
-                consecutive_waf += 1
-                log.warning(f"[{name}] WAF #{consecutive_waf} on {s.ep['name']}")
-                await url_queue.put(url)
-                s.report_waf()
-                if consecutive_waf >= 6:
-                    request_restart(f"WAF x{consecutive_waf}")
-                    break
-                await s.rotate()
-                await jittered_delay(2.0, 5.0)
-                continue
+                recovered = False
+                if await detect_captcha(s.page, url_only=True):
+                    stats["captchas"] += 1
+                    delay.captcha_enter()
+                    try:
+                        ok = await s.handle_captcha(url)
+                    finally:
+                        delay.captcha_exit()
+                    if ok:
+                        result, goto_dt = await s.goto(url, sem)
+                        recovered = (
+                            result and
+                            not await detect_waf_rate_limit(s.page) and
+                            not await detect_captcha(s.page, url_only=True)
+                        )
+                if recovered:
+                    consecutive_waf = 0
+                    await s.report_waf_resolved()
+                else:
+                    consecutive_waf += 1
+                    log.warning(f"[{name}] WAF #{consecutive_waf} on {s.ep['name']}")
+                    await url_queue.put(url)
+                    if consecutive_waf >= 6:
+                        request_restart(f"WAF x{consecutive_waf}")
+                        break
+                    await s.rotate(EndpointEvent.WAF, "waf")
+                    await jittered_delay(2.0, 5.0)
+                    continue
 
             consecutive_waf = 0
-            s.report_success()
+            await s.report_success()
 
             if await detect_captcha(s.page, url_only=True):
                 stats["captchas"] += 1
@@ -658,7 +587,7 @@ async def retry_offers(name, browser, retry_queue, url_queue, row_queue, sem, de
                 finally:
                     delay.captcha_exit()
                 if not ok:
-                    await s.rotate("captcha failed")
+                    await s.rotate(EndpointEvent.CAPTCHA, "captcha failed")
                     await jittered_delay(2.0, 4.0)
                     continue
                 result, goto_dt = await s.goto(url, sem)
@@ -752,7 +681,41 @@ async def memory_watchdog(threshold_mb):
         await asyncio.sleep(30)
 
 
-async def print_stats_periodically(stats, t0, interval=300):
+def _build_runtime_checkpoint(completed, url_queue, retry_queue, session_plan, registry):
+    return {
+        "completed_filters": list(completed),
+        "pending_urls": queue_snapshot(url_queue),
+        "retry_urls": queue_snapshot(retry_queue),
+        "runtime_session_plan": session_plan.to_dict() if session_plan else None,
+        "endpoint_snapshots": registry.snapshots() if registry else [],
+    }
+
+
+async def _restore_runtime_queues(checkpoint, url_queue, retry_queue, seen):
+    pending = checkpoint.get("pending_urls", []) if checkpoint else []
+    retry = checkpoint.get("retry_urls", []) if checkpoint else []
+
+    for url in pending:
+        seen.add(url)
+        await url_queue.put(url)
+
+    for url in retry:
+        seen.add(url)
+        await retry_queue.put(url)
+
+    return len(pending), len(retry)
+
+
+async def checkpoint_runtime_periodically(completed, url_queue, retry_queue, session_plan, registry, interval=30):
+    while not should_stop():
+        save_checkpoint(
+            "cian",
+            _build_runtime_checkpoint(completed, url_queue, retry_queue, session_plan, registry),
+        )
+        await asyncio.sleep(interval)
+
+
+async def print_stats_periodically(stats, t0, registry=None, interval=300):
     while not should_stop():
         await asyncio.sleep(interval)
         elapsed_min = (time.monotonic() - t0) / 60 if t0 else 1
@@ -768,158 +731,366 @@ async def print_stats_periodically(stats, t0, interval=300):
             f"  rate: {rate:.1f} offers/min\n"
             f"{'-'*50}"
         )
+        if registry:
+            for line in registry.format_lines():
+                log.info(f"[EP] {line}")
 
 
-async def _run_session(all_filters, seen, stats, cfg, t0, proxy_pool=None):
-    checkpoint = load_checkpoint("cian")
-    done_labels = set(checkpoint.get("completed_filters", [])) if checkpoint else set()
+async def _run_serial_offer_retry(
+    browser_pool, endpoint_name, pw, url_queue, retry_queue, row_queue, sem,
+    delay, stats, cfg, orchestrator, max_crashes,
+):
+    while queue_snapshot(url_queue) or queue_snapshot(retry_queue):
+        if queue_snapshot(url_queue):
+            await url_queue.put(None)
+            await supervised(
+                "P1",
+                lambda b=browser_pool.get(), pw=pw: parse_offers(
+                    "P1",
+                    b,
+                    url_queue,
+                    retry_queue,
+                    row_queue,
+                    sem,
+                    delay,
+                    stats,
+                    cfg,
+                    orchestrator=orchestrator,
+                    endpoint_name=endpoint_name,
+                    pw=pw,
+                ),
+                max_crashes,
+            )
+
+        if queue_snapshot(retry_queue):
+            await retry_queue.put(None)
+            await supervised(
+                "R1",
+                lambda b=browser_pool.get(), pw=pw: retry_offers(
+                    "R1",
+                    b,
+                    retry_queue,
+                    url_queue,
+                    row_queue,
+                    sem,
+                    delay,
+                    stats,
+                    orchestrator=orchestrator,
+                    cfg=cfg,
+                    endpoint_name=endpoint_name,
+                    pw=pw,
+                ),
+                max_crashes,
+            )
+
+
+async def _run_session(all_filters, seen, stats, cfg, t0):
+    checkpoint = load_checkpoint("cian") or {}
+    done_labels = set(checkpoint.get("completed_filters", []))
     if done_labels:
         log.info(f"checkpoint: {len(done_labels)} filters done")
 
     remaining = [f for f in all_filters if f["label"] not in done_labels]
     completed = list(done_labels)
+    restored_pending = checkpoint.get("pending_urls", [])
+    restored_retry = checkpoint.get("retry_urls", [])
     log.info(f"remaining: {len(remaining)} of {len(all_filters)}")
 
-    if not remaining:
+    if not remaining and not restored_pending and not restored_retry:
         log.info("all filters done!")
         clear_checkpoint("cian")
         return completed
 
-    n_listing = cfg.get("listing_workers", 1)
-    n_offer = cfg.get("offer_workers", 4)
-    n_retry = cfg.get("retry_workers", 2)
-    max_concurrent = cfg.get("max_concurrent", 10)
-    queue_max = cfg.get("url_queue_max", 300)
+    registry = EndpointRegistry(cfg.get("verified_endpoints") or [])
+    if checkpoint.get("endpoint_snapshots"):
+        registry.restore(checkpoint["endpoint_snapshots"])
+    registry.refresh()
+    if not registry.healthy_endpoints():
+        for name in registry.names():
+            state = registry.get(name)
+            if state.lifecycle.value == "dead":
+                continue
+            registry.mark_healthy(name, "restart rewarm", state.network_id)
+    orchestrator = EndpointOrchestrator(registry, cfg)
+
+    http_pool = await build_http_pool(cfg)
+    n_http = cfg.get("http_offer_workers", 20)
+    use_http = http_pool.alive > 0
+    if use_http:
+        log.info(f"[HTTP] pool ready: {http_pool.alive} slots, {n_http} workers")
+
+    session_plan = build_runtime_session_plan(
+        cfg, len(remaining), registry.snapshots(), http_offers=use_http,
+    )
+    planner_workers = session_plan.planner_workers
+    max_concurrent = session_plan.max_concurrent
+    if use_http:
+        queue_max = 5000  # httpx workers drain fast, но не unbounded на случай если все slots cooling
+    elif session_plan.serial_offer_phase:
+        queue_max = 0
+    else:
+        queue_max = max(cfg.get("url_queue_max", 300), len(restored_pending) + len(restored_retry) + 50)
     max_crashes = cfg.get("max_worker_crashes", 5)
     mem_threshold = cfg.get("memory_threshold_mb", 2500)
-    n_browsers = cfg.get("browser_pool_size", 6)
-
-    # offer_workers * кол-во endpoints = реальное число воркеров
-    n_endpoints = len(proxy_pool.get_healthy()) if proxy_pool else 1
-    total_offer = n_offer * n_endpoints
-    total_retry = n_retry
+    listing_slots = session_plan.listing_slots
+    offer_slots = session_plan.offer_slots
+    retry_slots = session_plan.retry_slots
+    total_offer = session_plan.total_offer
+    total_retry = session_plan.total_retry
+    n_browsers = session_plan.n_browsers
+    cfg["_runtime_offer_slots"] = max(1, total_offer)
+    cfg["_serial_offer_phase"] = session_plan.serial_offer_phase
 
     sem = asyncio.Semaphore(max_concurrent)
     url_queue = asyncio.Queue(maxsize=queue_max)
     retry_queue = asyncio.Queue()
     row_queue = asyncio.Queue()
     delay = AdaptiveDelay()
+    restored_counts = await _restore_runtime_queues(checkpoint, url_queue, retry_queue, seen)
 
-    log.info(
-        f"workers: {n_listing} listing + {total_offer} offer ({n_offer}x{n_endpoints} ep) "
-        f"+ {total_retry} retry, sem={max_concurrent}, browsers={n_browsers}"
+    runtime_desc = ", ".join(
+        f"{ep['name']}[{ep['slot_class']}:{ep.get('network_id', ep.get('ip', '-'))}]"
+        for ep in registry.runtime_endpoints()
     )
+    log.info(f"[PLAN] runtime endpoints: {runtime_desc}")
+    log.info(
+        f"[PLAN] sessions: {len(listing_slots)} listing + {total_offer} offer "
+        f"+ {total_retry} retry, sem={max_concurrent}, browsers={n_browsers}, "
+        f"planner={planner_workers}, serial={session_plan.serial_offer_phase}"
+    )
+    log.info(f"[PLAN] listing slots: {_format_slot_plan(listing_slots, registry)}")
+    log.info(f"[PLAN] offer slots: {_format_slot_plan(offer_slots, registry)}")
+    log.info(f"[PLAN] retry slots: {_format_slot_plan(retry_slots, registry)}")
+    if restored_counts != (0, 0):
+        log.info(
+            f"[PLAN] restored queues: pending={restored_counts[0]} retry={restored_counts[1]}"
+        )
 
     async with async_playwright() as pw:
         browser_pool = await launch_browser_pool(
             pw, n_browsers, headless=cfg.get("headless", True)
         )
 
+        # curl_cffi имитирует Chrome TLS, cookies не нужны
+        http_cookies = None
+
+        checkpoint_task = None
+        writer_task = None
+        watchdog_task = None
+        stats_task = None
         try:
-            # planner параллельно проверяет фильтры через N страниц из пула
-            filters = await plan_filters(browser_pool, sem, cfg, proxy_pool=proxy_pool)
-
-            filters = [f for f in filters if f["label"] not in done_labels]
-            log.info(f"after plan: {len(filters)} filters to crawl")
-
-            # делим фильтры между листинг-воркерами чтобы не дублировать
-            filter_chunks = [filters[i::n_listing] for i in range(n_listing)]
-            listing_stagger = cfg.get("listing_stagger", 3.0)
-            listing_tasks = [
-                asyncio.create_task(
-                    supervised(
-                        f"L{i+1}",
-                        lambda i=i, b=browser_pool.get(), chunk=filter_chunks[i]: crawl_listings(
-                            f"L{i+1}",
-                            b,
-                            chunk,
-                            url_queue,
-                            seen,
-                            sem,
-                            completed,
-                            delay,
-                            stats,
-                            cfg,
-                            pool=proxy_pool,
-                            stagger=i * listing_stagger,
-                        ),
-                        max_crashes,
-                    )
-                )
-                for i in range(n_listing)
-            ]
-
-            offer_stagger = cfg.get("offer_stagger", 0.5)
-            offer_tasks = [
-                asyncio.create_task(
-                    supervised(
-                        f"P{i+1}",
-                        lambda i=i, b=browser_pool.get(): parse_offers(
-                            f"P{i+1}",
-                            b,
-                            url_queue,
-                            retry_queue,
-                            row_queue,
-                            sem,
-                            delay,
-                            stats,
-                            cfg,
-                            pool=proxy_pool,
-                            stagger=i * offer_stagger,
-                        ),
-                        max_crashes,
-                    )
-                )
-                for i in range(total_offer)
-            ]
-
-            retry_tasks = [
-                asyncio.create_task(
-                    supervised(
-                        f"R{i+1}",
-                        lambda i=i, b=browser_pool.get(): retry_offers(
-                            f"R{i+1}",
-                            b,
-                            retry_queue,
-                            url_queue,
-                            row_queue,
-                            sem,
-                            delay,
-                            stats,
-                            pool=proxy_pool,
-                            stagger=i * offer_stagger,
-                            cfg=cfg,
-                        ),
-                        max_crashes,
-                    )
-                )
-                for i in range(total_retry)
-            ]
+            filters = []
+            if remaining:
+                if use_http:
+                    filters = await http_plan_filters(http_pool, cfg)
+                else:
+                    filters = await plan_filters(browser_pool, sem, cfg, orchestrator=orchestrator, pw=pw)
+                filters = [f for f in filters if f["label"] not in done_labels]
+                log.info(f"after plan: {len(filters)} filters to crawl")
 
             writer_task = asyncio.create_task(flush_rows(row_queue, stats))
             watchdog_task = asyncio.create_task(memory_watchdog(mem_threshold))
-            stats_task = asyncio.create_task(
-                print_stats_periodically(stats, t0)
+            stats_task = asyncio.create_task(print_stats_periodically(stats, t0, registry=registry))
+            checkpoint_task = asyncio.create_task(
+                checkpoint_runtime_periodically(
+                    completed,
+                    url_queue,
+                    retry_queue,
+                    session_plan,
+                    registry,
+                )
             )
 
-            await asyncio.gather(*listing_tasks)
+            listing_tasks = []
+            if use_http and filters:
+                # listing тоже через curl_cffi -- все 60 IP для listing + offers
+                n_listing = cfg.get("http_listing_workers", 8)
+                http_task = asyncio.create_task(
+                    run_http_workers(
+                        n_http, url_queue, retry_queue, row_queue,
+                        http_pool, stats, cfg, cookies=http_cookies,
+                    )
+                )
+                await run_http_listings(
+                    n_listing, filters, url_queue, seen, completed,
+                    http_pool, stats, cfg,
+                )
+                for _ in range(n_http):
+                    await url_queue.put(None)
+                await http_task
 
-            for _ in range(total_offer):
-                await url_queue.put(None)
-            await asyncio.gather(*offer_tasks)
+            elif not use_http and filters and listing_slots:
+                filter_chunks = [filters[i::len(listing_slots)] for i in range(len(listing_slots))]
+                listing_stagger = cfg.get("listing_stagger", 3.0)
+                listing_tasks = [
+                    asyncio.create_task(
+                        supervised(
+                            f"L{i+1}",
+                            lambda i=i, b=browser_pool.get(), chunk=filter_chunks[i], endpoint_name=listing_slots[i], pw=pw: crawl_listings(
+                                f"L{i+1}",
+                                b,
+                                chunk,
+                                url_queue,
+                                seen,
+                                sem,
+                                completed,
+                                delay,
+                                stats,
+                                cfg,
+                                orchestrator=orchestrator,
+                                stagger=i * listing_stagger,
+                                endpoint_name=endpoint_name,
+                                pw=pw,
+                                shared=False,
+                            ),
+                            max_crashes,
+                        )
+                    )
+                    for i in range(len(listing_slots))
+                ]
 
-            for _ in range(total_retry):
-                await retry_queue.put(None)
-            await asyncio.gather(*retry_tasks)
+            if use_http:
+                # retry через curl_cffi
+                retry_snapshot = queue_snapshot(retry_queue)
+                if retry_snapshot:
+                    log.info(f"[HTTP] retrying {len(retry_snapshot)} failed URLs")
+                    retry_as_url = asyncio.Queue()
+                    for u in retry_snapshot:
+                        await retry_as_url.put(u)
+                    while not retry_queue.empty():
+                        try:
+                            retry_queue.get_nowait()
+                        except Exception:
+                            break
+                    retry_http = asyncio.create_task(
+                        run_http_workers(
+                            min(n_http, len(retry_snapshot)),
+                            retry_as_url, asyncio.Queue(), row_queue,
+                            http_pool, stats, cfg, cookies=http_cookies,
+                        )
+                    )
+                    for _ in range(min(n_http, len(retry_snapshot))):
+                        await retry_as_url.put(None)
+                    await retry_http
 
+            elif session_plan.serial_offer_phase:
+                if listing_tasks:
+                    await asyncio.gather(*listing_tasks)
+                endpoint_name = (
+                    offer_slots[0] if offer_slots else
+                    (listing_slots[0] if listing_slots else registry.healthy_endpoints()[0]["name"])
+                )
+                await _run_serial_offer_retry(
+                    browser_pool,
+                    endpoint_name,
+                    pw,
+                    url_queue,
+                    retry_queue,
+                    row_queue,
+                    sem,
+                    delay,
+                    stats,
+                    cfg,
+                    orchestrator,
+                    max_crashes,
+                )
+            else:
+                offer_stagger = cfg.get("offer_stagger", 0.5)
+                offer_tasks = [
+                    asyncio.create_task(
+                        supervised(
+                            f"P{i+1}",
+                            lambda i=i, b=browser_pool.get(), endpoint_name=offer_slots[i], pw=pw: parse_offers(
+                                f"P{i+1}",
+                                b,
+                                url_queue,
+                                retry_queue,
+                                row_queue,
+                                sem,
+                                delay,
+                                stats,
+                                cfg,
+                                orchestrator=orchestrator,
+                                stagger=i * offer_stagger,
+                                endpoint_name=endpoint_name,
+                                pw=pw,
+                            ),
+                            max_crashes,
+                        )
+                    )
+                    for i in range(total_offer)
+                ]
+
+                retry_tasks = [
+                    asyncio.create_task(
+                        supervised(
+                            f"R{i+1}",
+                            lambda i=i, b=browser_pool.get(), endpoint_name=retry_slots[i], pw=pw: retry_offers(
+                                f"R{i+1}",
+                                b,
+                                retry_queue,
+                                url_queue,
+                                row_queue,
+                                sem,
+                                delay,
+                                stats,
+                                orchestrator=orchestrator,
+                                stagger=i * offer_stagger,
+                                cfg=cfg,
+                                endpoint_name=endpoint_name,
+                                pw=pw,
+                            ),
+                            max_crashes,
+                        )
+                    )
+                    for i in range(total_retry)
+                ]
+
+                if listing_tasks:
+                    await asyncio.gather(*listing_tasks)
+
+                for _ in range(total_offer):
+                    await url_queue.put(None)
+                await asyncio.gather(*offer_tasks)
+
+                if total_retry:
+                    for _ in range(total_retry):
+                        await retry_queue.put(None)
+                    await asyncio.gather(*retry_tasks)
+                elif queue_snapshot(retry_queue):
+                    endpoint_name = offer_slots[0] if offer_slots else listing_slots[0]
+                    await _run_serial_offer_retry(
+                        browser_pool,
+                        endpoint_name,
+                        pw,
+                        url_queue,
+                        retry_queue,
+                        row_queue,
+                        sem,
+                        delay,
+                        stats,
+                        cfg,
+                        orchestrator,
+                        max_crashes,
+                    )
+
+            save_checkpoint(
+                "cian",
+                _build_runtime_checkpoint(completed, url_queue, retry_queue, session_plan, registry),
+            )
             await row_queue.put(None)
             await writer_task
-
-            watchdog_task.cancel()
-            stats_task.cancel()
-
         finally:
+            if checkpoint_task:
+                checkpoint_task.cancel()
+            if watchdog_task:
+                watchdog_task.cancel()
+            if stats_task:
+                stats_task.cancel()
+            if writer_task and not writer_task.done():
+                writer_task.cancel()
             await browser_pool.close_all()
+            cleanup_temp_dirs()
 
     return completed
 
@@ -930,12 +1101,7 @@ async def main():
     cfg = load_scraper_config()
     install_shutdown_handler()
 
-    # поднимаем VDS tunnel если настроен, затем находим endpoints
     ensure_vds_tunnel(cfg)
-    if cfg.get("auto_discover", True):
-        discovered = await auto_discover(cfg)
-        cfg["endpoints"] = discovered
-
     seen = get_cached_urls(["cian", "cian_history"])
     log.info(f"cache: {len(seen)} urls")
 
@@ -945,35 +1111,34 @@ async def main():
     max_restarts = cfg.get("max_restarts", 5)
     cooldown = cfg.get("restart_cooldown", 60)
 
-    async with ProxyPool(cfg) as proxy_pool:
-        for attempt in range(max_restarts + 1):
-            if is_shutting_down():
-                break
+    for attempt in range(max_restarts + 1):
+        if is_shutting_down():
+            break
 
-            if attempt > 0:
-                log.info(f"\n=== RESTART {attempt}/{max_restarts}, cooldown {cooldown}s ===")
-                reset_restart()
-                await jittered_delay(cooldown * 0.8, cooldown * 1.2)
-                seen = get_cached_urls(["cian", "cian_history"])
-                log.info(f"cache: {len(seen)} urls")
+        if attempt > 0:
+            log.info(f"\n=== RESTART {attempt}/{max_restarts}, cooldown {cooldown}s ===")
+            reset_restart()
+            await jittered_delay(cooldown * 0.8, cooldown * 1.2)
+            seen = get_cached_urls(["cian", "cian_history"])
+            log.info(f"cache: {len(seen)} urls")
 
-            await _run_session(all_filters, seen, stats, cfg, t0, proxy_pool=proxy_pool)
+        await resolve_runtime_endpoints(cfg)
+        await _run_session(all_filters, seen, stats, cfg, t0)
 
-            if is_shutting_down():
-                break
-            if not is_restarting():
-                break
+        if is_shutting_down():
+            break
+        if not is_restarting():
+            break
 
     if not is_shutting_down() and not is_restarting():
         clear_checkpoint("cian")
         clear_checkpoint("cian_plan")
 
-    mode = "STOPPED" if is_shutting_down() else "DONE"
     elapsed_min = (time.monotonic() - t0) / 60
     rate = stats["parsed"] / elapsed_min if elapsed_min > 0 else 0
     waf = stats.get("waf_blocks", 0)
     log.info(f"\n{'='*50}")
-    log.info(f"  {mode}")
+    log.info(f"  {'STOPPED' if is_shutting_down() else 'DONE'}")
     log.info(f"{'='*50}")
     log.info(f"  parsed:   {stats['parsed']}")
     log.info(f"  saved:    {stats['saved']}")
@@ -984,10 +1149,36 @@ async def main():
     log.info(f"  time:     {elapsed_min:.1f}min")
     log.info(f"  rate:     {rate:.1f} offers/min")
     log.info(f"{'='*50}")
-    if is_shutting_down():
-        log.info("will resume from checkpoint")
 
     stop_vds_tunnel()
+    return stats
+
+
+async def main_loop():
+    """бесконечный цикл: прогон -> пауза -> прогон. Ctrl+C останавливает."""
+    install_shutdown_handler()
+    loop_pause = load_scraper_config().get("loop_pause", 300)
+    run = 0
+
+    while not is_shutting_down():
+        run += 1
+        log.info(f"\n{'#'*50}")
+        log.info(f"  RUN #{run}")
+        log.info(f"{'#'*50}")
+
+        stats = await main()
+
+        if is_shutting_down():
+            break
+
+        log.info(f"\npause {loop_pause}s before next run... (Ctrl+C to stop)")
+        try:
+            await asyncio.sleep(loop_pause)
+        except asyncio.CancelledError:
+            break
+
+        # сбрасываем restart flag для чистого старта
+        reset_restart()
 
 
 if __name__ == "__main__":
