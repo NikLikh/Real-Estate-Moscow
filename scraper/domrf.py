@@ -1,10 +1,3 @@
-"""Скрапер наш.дом.рф
-
-Headed hidden browser (--window-position off-screen): ServicePipe блокирует headless.
-Phase 1: listing --N parallel workers, __NEXT_DATA__ JSON extraction.
-Phase 2: offers --N parallel workers, CDP blocking, parse_domrf_offer(html).
-"""
-
 import asyncio
 import json
 import logging
@@ -38,7 +31,7 @@ LISTING_PATH = (
     "%D1%81%D0%BF%D0%B8%D1%81%D0%BE%D0%BA"
 )
 
-# offer pages: CSS/images/fonts не нужны, JS оставляем для SP challenge
+# на страницах квартир CSS/images/fonts не нужны, JS нужен для SP challenge
 OFFER_BLOCK_EXTRA = [
     "**/*.css",
     "**/*.svg",
@@ -62,13 +55,11 @@ def _domrf_cfg(cfg):
 
 
 class ProxyPool:
-    """Round-robin пул прокси, потокобезопасный для asyncio."""
 
     def __init__(self, proxies: list):
         self._proxies = proxies if proxies else [None]
         self._idx = 0
         self._lock = asyncio.Lock()
-        # только один worker пересоздаёт context одновременно
         self.recycle_lock = asyncio.Lock()
 
     async def next(self):
@@ -82,7 +73,7 @@ class ProxyPool:
 
 
 def _discover_cyberghost_proxies():
-    # статический server_list.json внутри CRX -> HTTPS proxies
+    # статический server_list.json внутри CRX
     from pathlib import Path
 
     server_list = (
@@ -152,7 +143,7 @@ def build_listing_urls(cfg):
 
 
 async def _create_context(browser, proxy=None, storage_state=None):
-    # НЕ override UA -- ServicePipe детектит mismatch с реальной версией Chromium
+    # не подменяем UA, ServicePipe детектит mismatch с реальной версией Chromium
     kw = dict(
         viewport={"width": 1920, "height": 1080},
         locale="ru-RU",
@@ -166,7 +157,7 @@ async def _create_context(browser, proxy=None, storage_state=None):
 
 
 async def _wait_for_sp(page, timeout=30):
-    # ServicePipe JS challenge ~3-5s, без JS не пройти
+    # ServicePipe JS challenge ~3-5s
     for i in range(timeout):
         try:
             html = await page.content()
@@ -197,7 +188,7 @@ async def _wait_for_sp(page, timeout=30):
             if len(html) < 5000:
                 log.warning(f"[SP] blocked 403 at {i}s")
                 return False
-            # domrf 403 (не SP) --cookies уже установлены
+            # domrf 403 (не SP), cookies уже установлены
             log.info(f"[SP] domrf 403, cookies set, {i}s")
             return True
 
@@ -206,7 +197,7 @@ async def _wait_for_sp(page, timeout=30):
 
         await asyncio.sleep(1)
 
-    # последняя попытка --reload
+    # последняя попытка, reload
     log.info("[SP] timeout, reload...")
     try:
         await page.reload(timeout=30000, wait_until="domcontentloaded")
@@ -240,10 +231,10 @@ async def _listing_worker(name, browser, url_tpl, pages, result_urls, seen, cfg,
     ctx = await _create_context(browser, proxy=proxy)
     page = await ctx.new_page()
     sp_passed = False
-    consecutive_fails = 0  # network/proxy ошибки -- ротация
-    real_empty = 0  # страницы с 0 flats при валидном ответе -- конец данных
+    consecutive_fails = 0  # network/proxy ошибки, ротируем при 3+
+    real_empty = 0
     rotations = 0
-    max_rotations = 8  # не крутить бесконечно
+    max_rotations = 8
 
     async def _rotate():
         nonlocal ctx, page, proxy, sp_passed, consecutive_fails, rotations
@@ -263,7 +254,7 @@ async def _listing_worker(name, browser, url_tpl, pages, result_urls, seen, cfg,
         sp_passed = False
         consecutive_fails = 0
         rotations += 1
-        log.info(f"[{name}] rotated ({rotations}) -> {proxy and proxy['server']}")
+        log.info(f"[{name}] ротация #{rotations}, прокси={proxy and proxy['server']}")
 
     try:
         for pg in pages:
@@ -288,7 +279,7 @@ async def _listing_worker(name, browser, url_tpl, pages, result_urls, seen, cfg,
                 consecutive_fails += 1
                 if consecutive_fails >= 3:
                     if rotations >= max_rotations:
-                        log.warning(f"[{name}] max rotations, stopping")
+                        log.warning(f"[{name}] лимит ротаций, останавливаем")
                         break
                     await _rotate()
                 continue
@@ -324,11 +315,11 @@ async def _listing_worker(name, browser, url_tpl, pages, result_urls, seen, cfg,
                     if rotations < max_rotations:
                         await _rotate()
                     else:
-                        log.warning(f"[{name}] max rotations, stopping")
+                        log.warning(f"[{name}] лимит ротаций, останавливаем")
                         break
                 continue
 
-            consecutive_fails = 0  # страница загрузилась нормально
+            consecutive_fails = 0
 
             flats = _parse_next_data_flats(html)
             if not flats:
@@ -338,9 +329,7 @@ async def _listing_worker(name, browser, url_tpl, pages, result_urls, seen, cfg,
                     break
                 continue
 
-            real_empty = 0  # сброс: были данные
-
-            consecutive_empty = 0
+            real_empty = 0
             new = 0
             for f in flats:
                 flat_url = _flat_url(f["elemId"])
@@ -360,11 +349,6 @@ async def _listing_worker(name, browser, url_tpl, pages, result_urls, seen, cfg,
 
 
 async def crawl_listings(browser, cfg, seen):
-    """Listing: N parallel workers, interleaved pages.
-
-    page=0 --landing (no data), start from page=1.
-    Each worker passes SP independently on its first page.
-    """
     dc = _domrf_cfg(cfg)
     n_workers = dc.get("listing_workers", 4)
     proxies = _get_proxies(cfg)
@@ -404,13 +388,12 @@ async def crawl_listings(browser, cfg, seen):
         await asyncio.gather(*tasks)
         log.info(f"[LISTING] {region_name} done: {len(all_urls)} URLs")
 
-    # кэшируем URL сразу -- если warmup упадёт, при рестарте пойдём в offers
+    # сохраняем URL сразу, при рестарте пойдём в offers
     if all_urls:
         save_checkpoint("domrf", {"pending_urls": all_urls})
         log.info(f"[LISTING] checkpoint saved: {len(all_urls)} URLs")
 
-    # storage_state для offer workers: один warmup request
-    # через прокси -- голый IP может быть заблокирован
+    # прогреваем storage_state через прокси
     warmup_url = regions[0][1].format(page=1)
     storage = None
     for attempt, px in enumerate(proxies[:5] if proxies else [None]):
@@ -430,7 +413,7 @@ async def crawl_listings(browser, cfg, seen):
             await page.close()
             await ctx.close()
     if not storage:
-        log.warning("[WARMUP] all failed -- workers will pass SP individually")
+        log.warning("[WARMUP] все попытки провалились, воркеры пройдут SP сами")
 
     return all_urls, storage
 
@@ -462,7 +445,6 @@ async def _offer_worker(name, browser, urls, stats, storage_state, cfg, pool):
     async def _recycle(rotate=False):
         nonlocal ctx, page, req_count, proxy, batch_size
         await _flush()
-        # Lock: только один worker пересоздаёт context за раз
         async with pool.recycle_lock:
             try:
                 await page.close()
@@ -481,9 +463,9 @@ async def _offer_worker(name, browser, urls, stats, storage_state, cfg, pool):
                 log.error(f"[{name}] browser dead, stopping: {e!r:.80}")
                 raise
         req_count = 0
-        batch_size = base_batch + random.randint(-5, 10)  # новый jitter
+        batch_size = base_batch + random.randint(-5, 10)
         if rotate:
-            log.info(f"[{name}] rotated -> {proxy and proxy['server']}")
+            log.info(f"[{name}] ротация, прокси={proxy and proxy['server']}")
 
     try:
         for i, url in enumerate(urls):
@@ -517,7 +499,7 @@ async def _offer_worker(name, browser, urls, stats, storage_state, cfg, pool):
                         await _wait_for_sp(page, timeout=10)
                     except Exception:
                         pass
-                log.info(f"[{name}] first page loaded, starting parse")
+                log.info(f"[{name}] первая страница загружена, начинаем парсинг")
 
             try:
                 await page.wait_for_selector(
@@ -537,7 +519,7 @@ async def _offer_worker(name, browser, urls, stats, storage_state, cfg, pool):
                     await _recycle(rotate=True)
                 continue
 
-            consecutive_errors = 0  # успех -- сбрасываем счётчик
+            consecutive_errors = 0
 
             try:
                 html = await page.content()
@@ -601,11 +583,11 @@ async def _run_session(cfg):
         browser = await launch_domrf_browser(pw)
 
         try:
-            # Phase 1: listing
+            # фаза 1: листинг
             if pending:
                 log.info(f"[RESUME] {len(pending)} pending from checkpoint")
                 all_urls = [u for u in pending if u not in seen]
-                # warmup для storage_state (через прокси, с retry)
+                # прогреваем storage_state через прокси
                 warmup_url = build_listing_urls(cfg)[0][1].format(page=1)
                 storage = None
                 for attempt, px in enumerate(proxies[:5] if proxies else [None]):
@@ -628,19 +610,19 @@ async def _run_session(cfg):
                         await ctx.close()
                 if not storage:
                     log.warning(
-                        "[WARMUP] all failed -- workers will pass SP individually"
+                        "[WARMUP] все попытки провалились, воркеры пройдут SP сами"
                     )
             else:
                 all_urls, storage = await crawl_listings(browser, cfg, seen)
 
             if not all_urls:
-                log.info("no new URLs")
+                log.info("нет новых URL")
                 return
 
             log.info(f"[OFFERS] {len(all_urls)} URLs, {n_offer} workers")
             save_checkpoint("domrf", {"pending_urls": all_urls})
 
-            # Phase 2: offers
+            # фаза 2: парсинг квартир
             offer_pool = ProxyPool(proxies)
             stats = {"parsed": 0, "saved": 0, "errors": 0, "no_price": 0}
             chunks = [all_urls[i::n_offer] for i in range(n_offer)]
@@ -706,7 +688,7 @@ async def main():
         log.info(f"  rate:     {rate:.1f}/min")
         log.info(f"{'=' * 50}")
     if is_shutting_down():
-        log.info("will resume from checkpoint")
+        log.info("продолжим из checkpoint при следующем запуске")
 
 
 if __name__ == "__main__":

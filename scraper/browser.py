@@ -1,18 +1,16 @@
 import asyncio
 import logging
 import random
-import time
 from urllib.parse import urlparse
 from typing import Sequence
 
-from patchright.async_api import Browser, BrowserContext, Frame, Page
+from patchright.async_api import Browser, BrowserContext, Page
 from playwright_stealth import Stealth
 
 log = logging.getLogger("re")
 
 
 class BrowserPool:
-    # пул из N Chromium, round-robin
 
     def __init__(self, browsers: list[Browser]):
         self._browsers = browsers
@@ -44,7 +42,6 @@ async def launch_browser_pool(playwright, n: int, headless=False) -> BrowserPool
     return BrowserPool(browsers)
 
 
-# Chrome UA
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36",
@@ -63,7 +60,6 @@ VIEWPORTS = [
 
 
 class SessionIdentity:
-    # фикс fingerprint на время жизни воркера, иначе WAF палит ротацию
 
     def __init__(self, user_agent=None, viewport=None, scale=None):
         self.user_agent = user_agent or random.choice(USER_AGENTS)
@@ -88,7 +84,7 @@ class SessionIdentity:
         )
 
 
-# блокируем трекеры, карты, шрифты, медиа чтобы экономить RAM и трафик
+# трекеры, карты, шрифты, медиа
 BLOCKED_PATTERNS = [
     "**/mc.yandex.ru/**",
     "**/google-analytics.com/**",
@@ -114,8 +110,7 @@ BLOCKED_PATTERNS = [
     "**/cdn-p.cian.site/**",
 ]
 
-# для offer-страниц: JS, CSS, SVG, картинки
-# JS не нужен т.к. все данные в SSR
+# на offer-страницах JS не нужен, все данные в SSR
 OFFER_EXTRA_BLOCKED = [
     "**/*.js",
     "**/*.css",
@@ -152,7 +147,7 @@ CHROMIUM_ARGS = [
     "--mute-audio",
 ]
 
-# убираем компоненты vpn-расширений
+# без vpn-компонентов
 CHROMIUM_ARGS_VPN = [
     a
     for a in CHROMIUM_ARGS
@@ -164,8 +159,7 @@ _stealth = Stealth(
     navigator_languages_override=["ru-RU", "ru", "en-US", "en"],
 )
 
-# domrf: ServicePipe детектит --disable-http2, --disable-gpu, playwright_stealth
-# headed hidden (--window-position) вместо headless
+# domrf: ServicePipe детектит http2/gpu флаги, headed hidden вместо headless
 CHROMIUM_ARGS_DOMRF = [
     "--disable-blink-features=AutomationControlled",
     "--no-first-run",
@@ -232,7 +226,6 @@ async def create_stealth_context(
 
 
 async def apply_cdp_blocking(page: Page, extra_patterns: Sequence[str] = ()):
-    """блокировка ресурсов через CDP (быстрее чем route.abort)"""
     patterns = list(BLOCKED_PATTERNS) + list(extra_patterns)
     try:
         client = await page.context.new_cdp_session(page)
@@ -254,7 +247,6 @@ async def reset_cdp_blocking(client):
 
 
 async def humanize(page: Page):
-    # имитация живого человека, двигаем мышь и скроллим
     vp = page.viewport_size or {"width": 1920, "height": 1080}
 
     for _ in range(random.randint(3, 5)):
@@ -272,7 +264,6 @@ async def humanize(page: Page):
 
 
 async def jittered_delay(min_s: float, max_s: float):
-    # gaussian реалистичнее чем uniform
     mean = (min_s + max_s) / 2
     std = (max_s - min_s) / 4
     delay = max(min_s, min(max_s, random.gauss(mean, std)))
@@ -280,15 +271,14 @@ async def jittered_delay(min_s: float, max_s: float):
 
 
 async def warmup_session(page: Page):
-    # визит на главную создает cookies и историю
-    # JS должен быть разрешен на этом этапе -- WAF-скрипты ставят cookies
+    # визит на главную для cookies, JS нужен для WAF-скриптов
     try:
         await page.goto(
             "https://www.cian.ru/", timeout=30000, wait_until="domcontentloaded"
         )
         await jittered_delay(3.0, 5.0)
         await humanize(page)
-        # ждём networkidle -- WAF-скрипты грузятся асинхронно
+        # WAF-скрипты грузятся асинхронно
         try:
             await page.wait_for_load_state("networkidle", timeout=10000)
         except Exception:
@@ -460,7 +450,7 @@ class WebProxyPageAdapter:
         return await self._page.wait_for_url(url, timeout=timeout)
 
 
-# ищем в HTML, если находим значит нарвались на капчу
+# признаки капчи в HTML
 CAPTCHA_SIGNS = [
     "smartcaptcha",
     "captcha-api.yandex",
@@ -481,7 +471,7 @@ VPN_SIGNS = [
     "vpn detected",
 ]
 
-# ставим WAF rate limit отдельно от VPN-блока, при нём нужна ротация endpoint
+# WAF rate limit, отдельно от VPN-блока
 WAF_RATE_LIMIT_SIGNS = [
     "cian_waf_block",
     "cian_waf_rate_limit",
@@ -498,7 +488,6 @@ async def _get_page_text(page: Page) -> str:
 
 
 async def detect_captcha(page: Page, url_only=False) -> bool:
-    # url_only=True когда JS заблокирован (иначе false-positive от <script> тегов)
     try:
         url = page.url.lower()
         if "captcha" in url or "showcaptcha" in url:
@@ -562,7 +551,7 @@ async def _try_click_element(page: Page, selectors: list[str], frame=None) -> bo
         btn = await target.query_selector(selector)
         if not btn:
             continue
-        # на page двигаем мышь к кнопке (реалистичнее), на frame просто btn.click()
+        # на page двигаем мышь, на frame просто click
         if frame is None:
             box = await btn.bounding_box()
             if box and box["width"] > 0 and box["height"] > 0:
@@ -593,7 +582,7 @@ async def _try_click_smartcaptcha(page: Page) -> bool:
     return False
 
 
-# селекторы галочки (checked state) SmartCaptcha
+# галочка SmartCaptcha
 CAPTCHA_CHECKED_SELECTORS = [
     ".CheckboxCaptcha-Checkbox_checked",
     ".CheckboxCaptcha_checked",
@@ -609,17 +598,17 @@ async def _is_checkbox_checked(page: Page) -> bool:
         if el:
             return True
 
-    # иногда галочка это SVG внутри кнопки
+    # SVG внутри кнопки = галочка
     for sel in CAPTCHA_BUTTON_SELECTORS:
         btn = await page.query_selector(sel)
         if not btn:
             continue
-        # svg/path внутри кнопки = галочка
+        # svg внутри кнопки
         svg = await btn.query_selector("svg")
         if svg:
             return True
 
-    # проверяем во фреймах
+    # фреймы
     for frame in page.frames:
         if frame.url == page.url:
             continue
@@ -641,18 +630,18 @@ async def handle_captcha(page: Page, max_attempts=3, url_only=False) -> bool:
     log.info("    CAPTCHA, trying auto-click...")
 
     for attempt in range(max_attempts):
-        # SmartCaptcha анализирует timing, поэтому ждем подольше
+        # SmartCaptcha анализирует timing
         await jittered_delay(2.5, 5.0)
 
         clicked = await _try_click_smartcaptcha(page)
         if clicked:
             log.info(f"    clicked checkbox ({attempt + 1})")
 
-            # галочка это главный флаг решения капчи
+            # галочка = решение
             await asyncio.sleep(1.5)
             if await _is_checkbox_checked(page):
                 log.info("    checkbox checked, waiting for redirect...")
-                # галочка есть, ждем пока страница перезагрузится
+                # ждем перезагрузку
                 try:
                     await page.wait_for_url(
                         lambda url: "captcha" not in url.lower(), timeout=15000
@@ -667,7 +656,7 @@ async def handle_captcha(page: Page, max_attempts=3, url_only=False) -> bool:
                 log.info("    captcha solved (checkbox checked)")
                 return True
 
-            # redirect без галочки (бывает на старых версиях капчи)
+            # redirect без галочки (старые версии)
             try:
                 await page.wait_for_url(
                     lambda url: "captcha" not in url.lower(), timeout=8000
@@ -693,11 +682,11 @@ async def handle_captcha(page: Page, max_attempts=3, url_only=False) -> bool:
             )
             await jittered_delay(2.0, 4.0)
 
-    # длинная пауза, иногда капча уходит сама
+    # длинная пауза, капча иногда уходит сама
     log.info("    captcha not solved, long pause before giving up...")
     await jittered_delay(15.0, 30.0)
 
-    # после паузы проверяем и галочку, и исчезновение капчи
+    # проверяем галочку и исчезновение
     if await _is_checkbox_checked(page):
         log.info("    checkbox checked after pause")
         try:
@@ -725,7 +714,6 @@ async def handle_captcha(page: Page, max_attempts=3, url_only=False) -> bool:
 
 
 class AdaptiveDelay:
-    # увеличивает задержки после капчи, снижает после серии успехов
 
     def __init__(
         self,

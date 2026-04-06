@@ -23,6 +23,9 @@ from config.settings import PROJECT_ROOT
 
 log = logging.getLogger("re")
 
+_CHECKPOINT_DIR = PROJECT_ROOT / "checkpoints"
+_CHECKPOINT_DIR.mkdir(exist_ok=True)
+
 # shutdown (ctrl+c) и restart (память/ошибки), воркеры проверяют should_stop()
 _shutdown = asyncio.Event()
 _restart = asyncio.Event()
@@ -74,7 +77,7 @@ async def managed_page(context):
 
 def save_checkpoint(name: str, state: dict):
     # пишем через tmp чтобы не потерять файл при обрыве
-    path = PROJECT_ROOT / f".checkpoint_{name}.json"
+    path = _CHECKPOINT_DIR / f".checkpoint_{name}.json"
     tmp = path.with_suffix(".tmp")
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(state, f, ensure_ascii=False)
@@ -82,7 +85,7 @@ def save_checkpoint(name: str, state: dict):
 
 
 def load_checkpoint(name: str) -> dict | None:
-    path = PROJECT_ROOT / f".checkpoint_{name}.json"
+    path = _CHECKPOINT_DIR / f".checkpoint_{name}.json"
     if not path.exists():
         return None
     with open(path, encoding="utf-8") as f:
@@ -90,13 +93,13 @@ def load_checkpoint(name: str) -> dict | None:
 
 
 def clear_checkpoint(name: str):
-    path = PROJECT_ROOT / f".checkpoint_{name}.json"
+    path = _CHECKPOINT_DIR / f".checkpoint_{name}.json"
     path.unlink(missing_ok=True)
 
 
 def save_dead_letter(name: str, url: str, reason: str = ""):
     # url-ы которые упали больше N раз, потом можно разобраться вручную
-    path = PROJECT_ROOT / f".dead_letters_{name}.json"
+    path = _CHECKPOINT_DIR / f".dead_letters_{name}.json"
     letters = load_dead_letters(name)
     letters.append({"url": url, "reason": reason})
     tmp = path.with_suffix(".tmp")
@@ -106,7 +109,7 @@ def save_dead_letter(name: str, url: str, reason: str = ""):
 
 
 def load_dead_letters(name: str) -> list[dict]:
-    path = PROJECT_ROOT / f".dead_letters_{name}.json"
+    path = _CHECKPOINT_DIR / f".dead_letters_{name}.json"
     if not path.exists():
         return []
     with open(path, encoding="utf-8") as f:
@@ -114,7 +117,7 @@ def load_dead_letters(name: str) -> list[dict]:
 
 
 def clear_dead_letters(name: str):
-    path = PROJECT_ROOT / f".dead_letters_{name}.json"
+    path = _CHECKPOINT_DIR / f".dead_letters_{name}.json"
     path.unlink(missing_ok=True)
 
 
@@ -746,7 +749,7 @@ class EndpointOrchestrator:
                 self._cb_until = time.monotonic() + self._cb_cooldown
                 self._waf_times.clear()
                 log.warning(
-                    f"[CIRCUIT] OPEN -- all workers paused for {self._cb_cooldown}s"
+                    f"[CIRCUIT] OPEN, все воркеры на паузе {self._cb_cooldown}s"
                 )
             return
         if event == EndpointEvent.NETWORK:
@@ -789,7 +792,7 @@ class EndpointOrchestrator:
         if remaining > 0:
             log.info(f"[CIRCUIT] waiting {remaining:.0f}s...")
             await asyncio.sleep(remaining)
-        log.info("[CIRCUIT] CLOSED -- resuming")
+        log.info("[CIRCUIT] CLOSED, продолжаем")
         return True
 
 
@@ -1094,7 +1097,7 @@ class EndpointSession:
             )
             self.ep = self.lease.endpoint
             log.info(
-                f"[{self.name}] {reason or event}, rotating {old_name} -> {self.lease.name}"
+                f"[{self.name}] {reason or event}, ротация {old_name} на {self.lease.name}"
             )
         await self._open_current()
         self._req_count = 0

@@ -6,7 +6,7 @@ from scraper.parsers import _parse_float
 
 
 def parse_domrf_offer(html: str) -> dict:
-    soup = BeautifulSoup(html, "html.parser")
+    soup = BeautifulSoup(html, "lxml")
     data = {}
     data.update(_parse_price_domrf(soup))
     data.update(_parse_flat_domrf(soup))
@@ -16,7 +16,7 @@ def parse_domrf_offer(html: str) -> dict:
 
 
 def _find(soup, class_contains: str):
-    # у домрф классы с хэшами типа PriceBlock__Price-sc-1a2b3c, ищем по префиксу
+    # классы домрф содержат хэши (PriceBlock__Price-sc-1a2b3c), ищем по префиксу
     return soup.find(class_=lambda c: c and class_contains in c)
 
 

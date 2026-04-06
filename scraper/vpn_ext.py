@@ -1,4 +1,4 @@
-"""VPN Chrome-расширения как endpoint'ы для ротации IP."""
+# VPN Chrome-расширения для ротации IP
 
 import asyncio
 import io
@@ -21,7 +21,7 @@ _stealth = Stealth(
     navigator_languages_override=["ru-RU", "ru", "en-US", "en"],
 )
 
-# Chrome Web Store CRX download -- публичный API обновления расширений
+# скачиваем CRX через публичный API обновлений Chrome Web Store
 _CWS_URL = (
     "https://clients2.google.com/service/update2/crx"
     "?response=redirect&prodversion=136.0&acceptformat=crx2,crx3"
@@ -32,7 +32,7 @@ _CWS_URL = (
 EXTENSIONS = {
     "browsec": {
         "webstore_id": "omghfjlpggmjjaagoclmmobgdodcjboh",
-        # proxy.setSingleServer() -- единственный рабочий способ активировать VPN
+        # proxy.setSingleServer() единственный рабочий способ активировать VPN
         # читаем серверы из lowLevelPac.countries.{country}, берем рандомный
         "connect_js": """async (country) => {
             const items = await new Promise(r => chrome.storage.local.get('lowLevelPac', r));
@@ -85,7 +85,6 @@ def cleanup_temp_dirs():
 
 
 def download_extension(ext_name):
-    """скачивает CRX из Chrome Web Store и распаковывает в extensions/{ext_name}/"""
     ext_cfg = EXTENSIONS.get(ext_name)
     if not ext_cfg or "webstore_id" not in ext_cfg:
         raise ValueError(f"no webstore_id for extension: {ext_name}")
@@ -104,7 +103,7 @@ def download_extension(ext_name):
     if not crx_data[:4] == b"Cr24":
         raise ValueError(f"downloaded file is not a valid CRX (got {crx_data[:20]})")
 
-    # распаковываем CRX -> extensions/{ext_name}/
+    # распаковываем CRX в extensions/{ext_name}/
     pk_offset = crx_data.find(b"PK\x03\x04")
     if pk_offset < 0:
         raise ValueError("CRX does not contain ZIP data")
@@ -136,7 +135,7 @@ def ensure_extensions(cfg):
 
 
 def unpack_crx(crx_path, dest_dir):
-    """CRX v2/v3 -- zip с заголовком. Пробуем как zip, если не выходит -- пропускаем заголовок."""
+    # CRX v2/v3: zip с заголовком, пробуем как zip, потом ищем PK сигнатуру
     crx_path = Path(crx_path)
     dest_dir = Path(dest_dir)
     dest_dir.mkdir(parents=True, exist_ok=True)
@@ -247,8 +246,6 @@ async def get_available_countries(bg, ext_name):
 async def launch_vpn_context(
     pw, ext_name, server_id, identity=None, headless=False, cfg_path=None
 ):
-    """запускает persistent context с VPN-расширением, подключает к серверу.
-    возвращает (context, bg_page) или райзит если расширение не загрузилось."""
     identity = identity or SessionIdentity()
 
     ext_cfg = EXTENSIONS.get(ext_name)
@@ -269,8 +266,8 @@ async def launch_vpn_context(
         f"--load-extension={ext_path}",
     ]
 
-    # --headless=new экспериментально поддерживает расширения (Chromium 112+)
-    # если не работает -- fallback на headless=False (вызывающий код решает)
+    # --headless=new экспериментально поддерживает расширения (Chromium 112+),
+    # если не работает, вызывающий код решает
     vp = {"width": 800, "height": 600} if headless else identity.viewport
     ctx = await pw.chromium.launch_persistent_context(
         user_data_dir=str(user_data_dir),
@@ -285,7 +282,7 @@ async def launch_vpn_context(
     )
     await _stealth.apply_stealth_async(ctx)
 
-    # Browsec показывает onboarding: "Принять" -> "Включить VPN"
+    # browsec показывает onboarding, без кликов расширение не активируется
     # без этих кликов расширение не активируется и lowLevelPac пустой
     await asyncio.sleep(2)
     await _activate_browsec(ctx, ext_name)

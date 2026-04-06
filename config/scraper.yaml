@@ -10,11 +10,11 @@ experimental_endpoint_types: [vpn_extension, web_proxy]
 
 endpoint_policies:
   default:
-    network_cooldown: 20
-    captcha_cooldown: 30
-    quarantine_cooldown: 900
-    max_warming_failures: 2
-    max_quarantine_failures: 3
+    network_cooldown: 3
+    captcha_cooldown: 5
+    quarantine_cooldown: 300
+    max_warming_failures: 3
+    max_quarantine_failures: 5
 
 # fallback если auto_discover: false
 endpoints:
@@ -62,6 +62,8 @@ regions:
       - [50_000_000, null]
     object_types: null
 
+allowed_region_ids: [1, 4593]
+
 skip_url_parts:
   - "/sale/room/"
   - "/sale/share/"
@@ -74,73 +76,48 @@ skip_phrases:
   - "комната в "
   - "доля в "
 
-headless: true
-max_concurrent: 30
-browser_pool_cap: 3   # planner теперь через curl_cffi, browser только fallback
+max_concurrent: 15
 planner_workers: 3
-listing_workers: 4
-listing_endpoint: direct
-offer_sessions_per_endpoint: 1
 retry_workers: 1
-vpn_headless: false
 
-batch_size: 20
-batch_cooldown: [5, 10]
-listing_batch_size: 12
-
-waf_endpoint_cooldown: 5  # при WAF меняем endpoint вместо длинных пауз
-
-# circuit breaker: N WAF за cb_window сек -> глобальная пауза
+waf_endpoint_cooldown: 3
 cb_window: 30
-cb_threshold: 6
-cb_cooldown: 90
+cb_threshold: 12
+cb_cooldown: 30
 
-# проактивный cooldown, чтобы не дожидаться WAF-блока
-ip_budget: 9000
-ip_budget_cooldown: 300
+ip_budget: 20000
+ip_budget_cooldown: 120
 
 max_pages: 54
 url_queue_max: 300
 max_cached_pages: 54
-min_new_first_page: 5
+min_new_first_page: 3
 max_offers_per_filter: 1000
-min_price_split: 500_000
+min_price_split: 100_000
 
-loop_pause: 60  # секунд между прогонами
+loop_pause: 60
 max_restarts: 50
-restart_cooldown: 1800
-max_worker_crashes: 10
+restart_cooldown: 600
+max_worker_crashes: 20
 memory_threshold_mb: 12000
 
-# расширения автоскачиваются из Chrome Web Store
 vpn_extensions:
   - extension: browsec
     path: extensions/browsec
     servers: [nl, uk, de, lt, lv, sg, us]
     rate_limit: 2.0
 
-web_proxy_enabled: false
-web_proxy_candidates:
-  - name: croxyproxy
-    type: web_proxy
-    landing_url: "https://www.croxyproxy.com/"
-    target_url: "https://www.cian.ru/"
-    url_input_selector: "input[name='url'], input[type='text']"
-    submit_selector: "button[type='submit'], input[type='submit']"
-
-captcha_service: null
-captcha_api_key: null
-captcha_long_pause: [15, 30]
-
-# curl_cffi offer/listing workers, параллельно с browser crawl
-http_listing_workers: 20
-http_offer_workers: 20
-http_per_slot_concurrency: 20
-http_rate_per_slot: 3.0  # req/s на слот: 0.5 = 5ч lifetime, 1.0 = 2.5ч, 3.0 = 50мин
-http_timeout: 15
-http_retry_max: 3
+http_listing_workers: 25
+http_offer_workers: 55
+http_per_slot_concurrency: 50
+http_rate_per_slot: 8.0
+http_timeout: 10
+http_retry_max: 2
 free_proxy_discovery: false
-proxy_refresh_interval: 600
+proxy_refresh_interval: 1800
+browsec_refresh_interval: 3600
+oneclickvpn_uuid: ""
+cian_validation: true
 
 domrf:
   base_url: "https://xn--80az8a.xn--d1aqf.xn--p1ai"

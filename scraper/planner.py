@@ -1,24 +1,15 @@
-"""Adaptive filter planner -- дробит ценовые диапазоны если слишком много объявлений."""
-
 import asyncio
 import logging
 import random
 import re
 
 from config.settings import load_scraper_config
-from scraper.browser import detect_captcha, detect_waf_rate_limit
-from scraper.runtime import (
-    EndpointEvent,
-    EndpointSession,
-    load_checkpoint,
-    save_checkpoint,
-)
+from scraper.runtime import load_checkpoint, save_checkpoint
 
 log = logging.getLogger("re")
 
 
 def build_filters_from_config(cfg=None):
-    # декартово произведение регион x комнаты x цена x тип объекта
     cfg = cfg or load_scraper_config()
     base = cfg["cian_base"]
     filters = []
@@ -60,28 +51,22 @@ def build_filters_from_config(cfg=None):
     return filters
 
 
-# studio/1-room/2-room считаем "малой" комнатностью
 _SMALL_ROOMS = {"studio", "1-room", "2-room"}
-
-# МО обрабатываем раньше МСК
 _REGION_ORDER = {"mo": 0, "msk": 1}
 
 
 def _priority_key(f):
-    # новостройки до 2-комн -> новостройки 3+ -> вторичка до 2-комн -> вторичка 3+ -> остальное
     region = _REGION_ORDER.get(f["region"], 9)
     small = f["room"] in _SMALL_ROOMS
     otype = f.get("otype")
 
     if otype == "new" or otype is None:
-        # МО без object_types, считаем наравне с новостройками
         group = 0 if small else 1
     elif otype == "resale":
         group = 2 if small else 3
     else:
         group = 4
 
-    # рандом внутри группы чтобы не долбить один ценовой сегмент подряд
     jitter = random.random()
     return (group, region, jitter)
 
@@ -114,142 +99,6 @@ def parse_offer_count(html: str) -> int | None:
     return int(digits) if digits else None
 
 
-async def check_filter_count(session, url, sem):
-    from scraper.browser import jittered_delay
-
-    result, _ = await session.goto(f"{url}&p=1", sem, timeout=30000)
-    if result == "network":
-        await session.rotate(EndpointEvent.NETWORK, "planner network")
-        return None
-    if not result:
-        return None
-
-    if await detect_waf_rate_limit(session.page):
-        await session.rotate(EndpointEvent.WAF, "planner waf")
-        return None
-
-    if await detect_captcha(session.page, url_only=True):
-        ok = await session.handle_captcha(f"{url}&p=1")
-        if not ok:
-            await session.rotate(EndpointEvent.CAPTCHA, "planner captcha")
-            return None
-
-    await jittered_delay(0.8, 1.5)
-
-    try:
-        html = await session.page.content()
-    except Exception:
-        return None
-
-    await session.report_success()
-    return parse_offer_count(html)
-
-
-async def plan_filters(browser_pool, sem, cfg=None, orchestrator=None, pw=None):
-    cfg = cfg or load_scraper_config()
-    raw = build_filters_from_config(cfg)
-    max_offers = cfg.get("max_offers_per_filter", 1400)
-    min_split = cfg.get("min_price_split", 1_000_000)
-
-    cp = load_checkpoint("cian_plan")
-    if cp and cp.get("filters"):
-        log.info(f"plan: loaded from checkpoint ({len(cp['filters'])} filters)")
-        # пересортируем по новым приоритетам
-        for f in cp["filters"]:
-            if "otype" not in f:
-                f["otype"] = None
-        cp["filters"].sort(key=_priority_key)
-        return cp["filters"]
-
-    # planner шарит endpoint (shared=True) -- не зависит от healthy_count
-    n_pages = min(len(browser_pool.all), max(1, cfg.get("planner_workers", 3)))
-    sessions = []
-    if orchestrator:
-        for i in range(n_pages):
-            session = EndpointSession(
-                f"PLN{i+1}",
-                "planner",
-                browser_pool.all[i % len(browser_pool.all)],
-                orchestrator,
-                block_extra=True,
-                pw=pw,
-                cfg=cfg,
-                do_warmup=False,
-                shared=True,
-            )
-            await session.open()
-            sessions.append(session)
-
-    log.info(f"plan: {len(raw)} raw filters, {n_pages} parallel workers")
-
-    # очередь фильтров для проверки
-    queue = asyncio.Queue()
-    for filt in raw:
-        await queue.put(filt)
-
-    result = []
-    lock = asyncio.Lock()
-
-    async def worker(session, wid):
-        while True:
-            try:
-                filt = queue.get_nowait()
-            except asyncio.QueueEmpty:
-                break
-            sub = await _maybe_split(
-                session, sem, filt, max_offers, min_split, cfg, queue
-            )
-            async with lock:
-                result.extend(sub)
-
-    try:
-        if orchestrator:
-            await asyncio.gather(*[worker(sessions[i], i) for i in range(n_pages)])
-        else:
-            raise RuntimeError("planner requires endpoint orchestrator")
-    finally:
-        for session in sessions:
-            await session.close()
-
-    result.sort(key=_priority_key)
-    save_checkpoint("cian_plan", {"filters": result})
-    log.info(f"plan: {len(result)} filters (from {len(raw)} raw)")
-    return result
-
-
-async def _maybe_split(session, sem, filt, max_offers, min_split, cfg, queue=None):
-    count = await check_filter_count(session, filt["url"], sem)
-    lo = filt["price_lo"] or 0
-    hi = filt["price_hi"]
-
-    if count is None:
-        log.info(f"  {filt['label']}: count unknown, keep as is")
-        return [filt]
-
-    if count <= max_offers:
-        log.info(f"  {filt['label']}: {count} offers -- ok")
-        return [filt]
-
-    if hi is None:
-        hi = lo * 3 if lo else 100_000_000
-    mid = (lo + hi) // 2
-
-    if mid - lo < min_split or hi - mid < min_split:
-        log.info(f"  {filt['label']}: {count} offers -- can't split further")
-        return [filt]
-
-    log.info(f"  {filt['label']}: {count} offers -- splitting at {mid // 1_000_000}M")
-
-    left = _derive_filter(filt, lo, mid, cfg)
-    right = _derive_filter(filt, mid, hi, cfg)
-
-    # splits проверяем рекурсивно на той же page
-    result = []
-    for sub in [left, right]:
-        result.extend(await _maybe_split(session, sem, sub, max_offers, min_split, cfg))
-    return result
-
-
 def _derive_filter(parent, new_lo, new_hi, cfg):
     base = cfg["cian_base"]
     region = cfg["regions"][parent["region"]]
@@ -278,42 +127,59 @@ def _derive_filter(parent, new_lo, new_hi, cfg):
     }
 
 
-async def _http_check_count(pool, url, cfg):
-    """curl_cffi версия check_filter_count -- без browser"""
+async def _http_check_count(pool, url, cfg, max_retries=3):
     from curl_cffi.requests import AsyncSession
-    from scraper.http_offers import _headers, _is_waf
+    from proxy_farm.detector import headers as _headers, is_waf as _is_waf, is_captcha as _is_captcha
+    from scraper.http_offers import parse_listing_urls
 
-    slot = await pool.acquire()
-    if not slot:
-        return None
+    for attempt in range(max_retries):
+        slot = await pool.acquire()
+        if not slot:
+            await asyncio.sleep(3)
+            continue
 
-    try:
-        async with AsyncSession(
-            impersonate="chrome", proxy=slot.proxy, max_clients=5
-        ) as s:
-            resp = await s.get(f"{url}&p=1", headers=_headers(), timeout=15)
-    except Exception:
-        return None
+        try:
+            async with AsyncSession(
+                impersonate="chrome", proxy=slot.proxy, max_clients=5
+            ) as s:
+                resp = await s.get(f"{url}&p=1", headers=_headers(), timeout=15)
+        except Exception:
+            await asyncio.sleep(2)
+            continue
 
-    if _is_waf(resp.text, resp.status_code):
-        pool.report_waf(slot, 30)
-        return None
+        if _is_waf(resp.text, resp.status_code):
+            pool.report_waf(slot, 30)
+            await asyncio.sleep(2)
+            continue
 
-    pool.report_ok(slot)
-    return parse_offer_count(resp.text)
+        if _is_captcha(resp.text, str(resp.url)):
+            pool.report_waf(slot, 60)
+            await asyncio.sleep(3)
+            continue
+
+        pool.report_ok(slot)
+        count = parse_offer_count(resp.text)
+        urls = parse_listing_urls(resp.text, cfg)
+        return count, urls
+
+    return None, []
 
 
-async def _http_maybe_split(pool, filt, max_offers, min_split, cfg):
-    count = await _http_check_count(pool, filt["url"], cfg)
+async def _http_maybe_split(pool, filt, max_offers, min_split, cfg, early_urls=None):
+    count, page1_urls = await _http_check_count(pool, filt["url"], cfg)
+    if early_urls is not None and page1_urls:
+        early_urls.extend(page1_urls)
     lo = filt["price_lo"] or 0
     hi = filt["price_hi"]
 
     if count is None:
-        log.info(f"  {filt['label']}: count unknown, keep as is")
+        log.info(f"  {filt['label']}: count unknown, оставляем как есть")
         return [filt]
 
+    filt["offer_count"] = count
+
     if count <= max_offers:
-        log.info(f"  {filt['label']}: {count} offers -- ok")
+        log.info(f"  {filt['label']}: {count} offers, ok")
         return [filt]
 
     if hi is None:
@@ -321,10 +187,10 @@ async def _http_maybe_split(pool, filt, max_offers, min_split, cfg):
     mid = (lo + hi) // 2
 
     if mid - lo < min_split or hi - mid < min_split:
-        log.info(f"  {filt['label']}: {count} offers -- can't split further")
+        log.info(f"  {filt['label']}: {count} offers, дальше не дробим")
         return [filt]
 
-    log.info(f"  {filt['label']}: {count} offers -- splitting at {mid // 1_000_000}M")
+    log.info(f"  {filt['label']}: {count} offers, дробим на {mid // 1_000_000}M")
 
     left = _derive_filter(filt, lo, mid, cfg)
     right = _derive_filter(filt, mid, hi, cfg)
@@ -335,8 +201,7 @@ async def _http_maybe_split(pool, filt, max_offers, min_split, cfg):
     return result
 
 
-async def http_plan_filters(pool, cfg=None):
-    """planner через curl_cffi -- без browser, использует HttpPool"""
+async def http_plan_filters(pool, cfg=None, url_queue=None, seen=None):
     cfg = cfg or load_scraper_config()
     raw = build_filters_from_config(cfg)
     max_offers = cfg.get("max_offers_per_filter", 1400)
@@ -344,63 +209,61 @@ async def http_plan_filters(pool, cfg=None):
 
     cp = load_checkpoint("cian_plan")
     if cp and cp.get("filters"):
-        log.info(f"plan: loaded from checkpoint ({len(cp['filters'])} filters)")
+        total = cp.get("total_offers", 0)
+        log.info(f"plan: loaded from checkpoint ({len(cp['filters'])} filters, ~{total} offers)")
         for f in cp["filters"]:
             if "otype" not in f:
                 f["otype"] = None
         cp["filters"].sort(key=_priority_key)
-        return cp["filters"]
+        return cp["filters"], total
 
     log.info(f"plan: {len(raw)} raw filters, processing via curl_cffi...")
 
-    sem = asyncio.Semaphore(10)
     result = []
+    early_urls = []
     lock = asyncio.Lock()
 
     async def worker(filt):
-        sub = await _http_maybe_split(pool, filt, max_offers, min_split, cfg)
+        sub = await _http_maybe_split(pool, filt, max_offers, min_split, cfg, early_urls=early_urls)
         async with lock:
             result.extend(sub)
 
-    # параллельно, но не больше 10 одновременно
-    tasks = []
-    for filt in raw:
-        tasks.append(worker(filt))
+    tasks = [worker(filt) for filt in raw]
     await asyncio.gather(*tasks)
 
+    # ранние URL-ы в очередь, чтобы offer workers не простаивали
+    if url_queue and early_urls:
+        added = 0
+        for href in early_urls:
+            if seen is not None and href in seen:
+                continue
+            if seen is not None:
+                seen.add(href)
+            try:
+                url_queue.put_nowait(href)
+                added += 1
+            except asyncio.QueueFull:
+                break
+        if added:
+            log.info(f"plan: fed {added} early URLs from page 1 into offer queue")
+
     result.sort(key=_priority_key)
-    save_checkpoint("cian_plan", {"filters": result})
-    log.info(f"plan: {len(result)} filters (from {len(raw)} raw)")
-    return result
-
-
-async def _dry_run():
-    from patchright.async_api import async_playwright
-
-    from scraper.browser import launch_browser_pool
-    from scraper.proxy import resolve_runtime_endpoints
-    from scraper.runtime import EndpointOrchestrator, EndpointRegistry
-
-    cfg = load_scraper_config()
-    sem = asyncio.Semaphore(4)
-    await resolve_runtime_endpoints(cfg)
-    registry = EndpointRegistry(cfg.get("verified_endpoints", []))
-    orchestrator = EndpointOrchestrator(registry, cfg)
-
-    async with async_playwright() as pw:
-        pool = await launch_browser_pool(pw, 4, headless=True)
-        try:
-            filters = await plan_filters(
-                pool, sem, cfg, orchestrator=orchestrator, pw=pw
-            )
-            log.info(f"total: {len(filters)} filters")
-            for f in filters[:10]:
-                log.info(f"  {f['label']}")
-            if len(filters) > 10:
-                log.info(f"  ... and {len(filters) - 10} more")
-        finally:
-            await pool.close_all()
+    total_offers = sum(f.get("offer_count", 0) for f in result)
+    save_checkpoint("cian_plan", {"filters": result, "total_offers": total_offers})
+    log.info(f"plan: {len(result)} filters, ~{total_offers} offers total")
+    return result, total_offers
 
 
 if __name__ == "__main__":
+    async def _dry_run():
+        from proxy_farm import build_proxy_pool
+        cfg = load_scraper_config()
+        pool = await build_proxy_pool(cfg)
+        filters, total = await http_plan_filters(pool, cfg)
+        log.info(f"total: {len(filters)} filters, ~{total} offers")
+        for f in filters[:10]:
+            log.info(f"  {f['label']}")
+        if len(filters) > 10:
+            log.info(f"  ... and {len(filters) - 10} more")
+
     asyncio.run(_dry_run())

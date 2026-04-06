@@ -1,5 +1,3 @@
-"""Runtime endpoint discovery, preflight, proxy pool"""
-
 import asyncio
 import logging
 import os
@@ -252,7 +250,7 @@ class ProxyPool:
             self._cb_tripped = True
             self._waf_times.clear()
             log.warning(
-                f"[CIRCUIT] OPEN -- all workers paused for {self._cb_cooldown}s"
+                f"[CIRCUIT] OPEN, все воркеры на паузе {self._cb_cooldown}s"
             )
 
     def report_success(self, name):
@@ -269,7 +267,7 @@ class ProxyPool:
         if remaining > 0:
             log.info(f"[CIRCUIT] waiting {remaining:.0f}s...")
             await asyncio.sleep(remaining)
-        log.info("[CIRCUIT] CLOSED -- resuming")
+        log.info("[CIRCUIT] CLOSED, продолжаем")
         return True
 
     @property
@@ -856,7 +854,7 @@ async def preflight_endpoints(cfg, candidates=None, runtime_only=True):
             )
             result = await _preflight_candidate(pw, candidate, retries=retries)
             if not result["ok"]:
-                log.warning(f"  {candidate['name']}: rejected -- {result['reason']}")
+                log.warning(f"  {candidate['name']}: отклонён, {result['reason']}")
                 continue
 
             network_id = result["network_id"]
@@ -872,7 +870,7 @@ async def preflight_endpoints(cfg, candidates=None, runtime_only=True):
             ep["last_verify_reason"] = result["reason"]
             verified.append(ep)
             log.info(
-                f"  {candidate['name']}: verified -- id={network_id} "
+                f"  {candidate['name']}: ok, id={network_id} "
                 f"lat={result['latency']:.1f}s"
             )
 

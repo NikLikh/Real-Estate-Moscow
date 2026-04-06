@@ -1,7 +1,5 @@
-import functools
 import logging
 import os
-import time
 from pathlib import Path
 
 import yaml
@@ -20,7 +18,7 @@ DB_CONFIG = {
     "password": os.getenv("DB_PASSWORD", ""),
 }
 
-# PySpark пишет в ту же БД, но через JDBC
+# pyspark пишет в ту же БД через JDBC
 JDBC_URL = (
     f"jdbc:postgresql://{DB_CONFIG['host']}:{DB_CONFIG['port']}/{DB_CONFIG['dbname']}"
 )
@@ -30,31 +28,20 @@ JDBC_PROPS = {
     "driver": "org.postgresql.Driver",
 }
 
-# Java/Spark не работает с кириллицей в пути -- используем алиас Nikita
+# java/spark не работает с кириллицей в пути, используем алиас Nikita
 _jars = PROJECT_ROOT / "jars" / "postgresql-42.7.4.jar"
 JARS_PATH = (
     str(_jars).replace("Никита", "Nikita") if "Никита" in str(_jars) else str(_jars)
 )
 
-# один раз на весь проект, формат без лишнего
+# LOG_LEVEL=DEBUG для подробных логов, INFO (default) для компактной status line
+_log_level = os.getenv("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(
-    level=logging.INFO,
+    level=getattr(logging, _log_level, logging.INFO),
     format="%(asctime)s %(message)s",
     datefmt="%H:%M:%S",
 )
 log = logging.getLogger("re")
-
-
-def timed(fn):
-    @functools.wraps(fn)
-    def wrapper(*args, **kwargs):
-        t0 = time.monotonic()
-        result = fn(*args, **kwargs)
-        dt = time.monotonic() - t0
-        log.info(f"{fn.__name__} took {dt:.1f}s")
-        return result
-
-    return wrapper
 
 
 # кэшируем чтобы не парсить yaml на каждый вызов
