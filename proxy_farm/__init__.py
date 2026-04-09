@@ -75,4 +75,5 @@ async def build_proxy_pool(cfg) -> HttpPool:
         s.budget = budget
 
     log.info(f"[HTTP] pool ready: {len(slots)} slots, {rate} req/s per slot")
-    return HttpPool(slots, rate_limit=rate)
+    max_conc = cfg.get("http_max_concurrent_per_proxy", 2)
+    return HttpPool(slots, rate_limit=rate, max_concurrent_per_proxy=max_conc)

@@ -18,6 +18,13 @@ def main():
     load_sub.add_parser("kaggle", help="6 датасетов через Spark")
     load_sub.add_parser("angultiaev", help="angultiaev 162GB через remotezip")
 
+    etl = sub.add_parser("etl", help="ETL-пайплайн Silver/Gold")
+    etl_sub = etl.add_subparsers(dest="target")
+    etl_sub.add_parser("silver", help="Bronze -> silver_listings")
+    etl_sub.add_parser("gold", help="silver_listings -> Gold-витрины")
+    etl_sub.add_parser("all", help="полный пайплайн Silver + Gold")
+    etl_sub.add_parser("check", help="quality checks Silver + Gold")
+
     args = parser.parse_args()
 
     # ленивые импорты, чтобы не тянуть тяжелые зависимости пока не нужны
@@ -49,6 +56,33 @@ def main():
             angultiaev_main()
         else:
             load.print_help()
+
+    elif args.command == "etl":
+        if args.target in ("silver", "gold", "all", "check"):
+            import logging
+            logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s", datefmt="%H:%M:%S")
+
+            if args.target in ("silver", "all"):
+                from etl.silver.pipeline import run_silver_etl
+
+                run_silver_etl()
+            if args.target in ("gold", "all"):
+                from etl.gold.pipeline import run_gold_etl
+
+                run_gold_etl()
+            if args.target == "check":
+                import psycopg2
+                from config.settings import DB_CONFIG
+                from etl.quality.checks import check_gold, check_silver
+
+                conn = psycopg2.connect(**DB_CONFIG)
+                cur = conn.cursor()
+                check_silver(cur)
+                check_gold(cur)
+                cur.close()
+                conn.close()
+        else:
+            etl.print_help()
 
     else:
         parser.print_help()

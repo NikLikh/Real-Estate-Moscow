@@ -22,14 +22,17 @@ class HttpSlot:
 
 class HttpPool:
 
-    def __init__(self, slots: list[HttpSlot], rate_limit=3.0):
+    def __init__(self, slots: list[HttpSlot], rate_limit=3.0, max_concurrent_per_proxy=2):
         self._slots = slots
         self._idx = 0
         self._lock = asyncio.Lock()
+        self._proxy_sems: dict[str, asyncio.Semaphore] = {}
+        self._max_concurrent = max_concurrent_per_proxy
         for s in slots:
             s.rate_limit = rate_limit
 
     async def acquire(self) -> HttpSlot | None:
+        """выдаём слот с учётом rate limit И concurrent per proxy"""
         while True:
             async with self._lock:
                 slot, wait = self._next_available_rate_limited()
@@ -38,8 +41,28 @@ class HttpPool:
                 if wait <= 0:
                     slot._last_req = time.monotonic()
                     slot.reqs += 1
+                    # проверяем per-proxy concurrency
+                    sem = self._get_proxy_sem(slot.proxy)
+                    if sem.locked() and sem._value == 0:
+                        # все concurrent-слоты для этого прокси заняты, пробуем другой
+                        continue
                     return slot
             await asyncio.sleep(min(wait, 0.1))
+
+    async def acquire_concurrent(self, slot: HttpSlot):
+        """захватываем concurrent-слот перед HTTP запросом"""
+        sem = self._get_proxy_sem(slot.proxy)
+        await sem.acquire()
+
+    def release_concurrent(self, slot: HttpSlot):
+        """освобождаем concurrent-слот после HTTP запроса"""
+        sem = self._get_proxy_sem(slot.proxy)
+        sem.release()
+
+    def _get_proxy_sem(self, proxy: str) -> asyncio.Semaphore:
+        if proxy not in self._proxy_sems:
+            self._proxy_sems[proxy] = asyncio.Semaphore(self._max_concurrent)
+        return self._proxy_sems[proxy]
 
     def _next_available_rate_limited(self) -> tuple:
         now = time.monotonic()

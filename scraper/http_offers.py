@@ -9,12 +9,20 @@ from curl_cffi.requests import AsyncSession
 from scraper.parsers import extract_cian_id, extract_region_id, parse_offer_page, parse_offer_from_json, parse_similar_urls_from_html
 from scraper.runtime import should_stop
 from proxy_farm.detector import is_waf, is_captcha, is_vpn_block, headers
+
+
+def _cid(href):
+    """извлекаем cian_id из любого варианта URL"""
+    m = re.search(r'/flat/(\d+)', href)
+    return int(m.group(1)) if m else None
 from proxy_farm.refresher import run_refresher
 
 log = logging.getLogger("re")
 
 
 async def fetch_offer(session, url, slot, pool, stats, cfg):
+    # ждём concurrent-слот для этого прокси (ограничивает нагрузку на IP)
+    await pool.acquire_concurrent(slot)
     t_fetch = time.monotonic()
     try:
         resp = await session.get(
@@ -24,16 +32,19 @@ async def fetch_offer(session, url, slot, pool, stats, cfg):
             allow_redirects=True,
         )
     except Exception as e:
+        pool.release_concurrent(slot)
         log.debug(f"[HTTP] {slot.label} network error: {e}")
         stats["net_errors"] = stats.get("net_errors", 0) + 1
         return None
+    pool.release_concurrent(slot)
     fetch_ms = (time.monotonic() - t_fetch) * 1000
     stats["fetch_ms_total"] = stats.get("fetch_ms_total", 0) + fetch_ms
     stats["fetch_count"] = stats.get("fetch_count", 0) + 1
 
     html = resp.text
     if len(html) > 5_000_000:
-        return None
+        stats["html_too_large"] = stats.get("html_too_large", 0) + 1
+        return "skipped"
     if slot.budget and slot.reqs >= slot.budget:
         pool.report_budget(slot, cfg.get("http_budget_cooldown", 300))
 
@@ -49,15 +60,21 @@ async def fetch_offer(session, url, slot, pool, stats, cfg):
 
     if is_vpn_block(html):
         pool.report_waf(slot, 60)
+        stats["vpn_blocks"] = stats.get("vpn_blocks", 0) + 1
         return None
 
     if resp.status_code != 200:
+        stats["bad_status"] = stats.get("bad_status", 0) + 1
+        # 404/410 = объявление удалено, ретраить бессмысленно
+        if resp.status_code in (404, 410):
+            return "skipped"
         return None
 
     pool.report_ok(slot)
 
     # комнаты и доли пропускаем, не нужен BS4
-    if "комната в " in html.lower() or "продается доля" in html.lower():
+    html_lower = html.lower()
+    if "комната в " in html_lower or "продается доля" in html_lower:
         stats["skipped"] = stats.get("skipped", 0) + 1
         return "skipped"
 
@@ -81,15 +98,17 @@ async def fetch_offer(session, url, slot, pool, stats, cfg):
     if method == "json":
         stats["json_hits"] = stats.get("json_hits", 0) + 1
 
+    # нет цены ни в JSON ни в BS4, ретраить бессмысленно
     if not data.get("price"):
         stats["no_price"] = stats.get("no_price", 0) + 1
-        return None
+        return "skipped"
 
     clean_url = url.split("?")[0]
     data["url"] = clean_url
     data["cian_id"] = extract_cian_id(clean_url)
     if not data["cian_id"]:
-        return None
+        stats["no_cian_id"] = stats.get("no_cian_id", 0) + 1
+        return "skipped"
 
     allowed = cfg.get("allowed_region_ids")
     region_id = extract_region_id(html)
@@ -123,58 +142,79 @@ async def http_offer_worker(
     skip_urls = cfg.get("skip_url_parts", [])
     skip_urls_set = set(skip_urls)
     seen_urls = seen if seen is not None else set()
+    batch_size = cfg.get("http_offer_batch", 1)
 
     try:
         while True:
-            try:
-                url = await asyncio.wait_for(url_queue.get(), timeout=60)
-            except asyncio.TimeoutError:
-                if should_stop():
+            # набираем batch
+            batch = []
+            stop = False
+            for _ in range(batch_size):
+                try:
+                    url = url_queue.get_nowait()
+                except asyncio.QueueEmpty:
                     break
-                continue
+                if url is None:
+                    stop = True
+                    break
+                if not any(part in url for part in skip_urls):
+                    batch.append(url)
+                else:
+                    stats["skipped"] = stats.get("skipped", 0) + 1
 
-            if url is None:
+            if not batch and not stop:
+                try:
+                    url = await asyncio.wait_for(url_queue.get(), timeout=60)
+                except asyncio.TimeoutError:
+                    if should_stop():
+                        break
+                    continue
+                if url is None:
+                    break
+                if any(part in url for part in skip_urls):
+                    stats["skipped"] = stats.get("skipped", 0) + 1
+                    continue
+                batch = [url]
+
+            if stop or not batch:
                 break
-
-            # экономим IP budget
-            if any(part in url for part in skip_urls):
-                stats["skipped"] = stats.get("skipped", 0) + 1
-                continue
 
             t_cycle = time.monotonic()
 
-            t_acq = time.monotonic()
-            slot = await pool.acquire()
-            acq_ms = (time.monotonic() - t_acq) * 1000
-            stats["acq_ms_total"] = stats.get("acq_ms_total", 0) + acq_ms
-            stats["acq_count"] = stats.get("acq_count", 0) + 1
-            if not slot:
-                await retry_queue.put(url)
-                await asyncio.sleep(0.5)
-                continue
+            # acquire слоты, запускаем fetch параллельно
+            # per-proxy concurrent ограничен в pool.acquire_concurrent()
+            pending = []
+            for url in batch:
+                slot = await pool.acquire()
+                if not slot:
+                    await retry_queue.put(url)
+                    continue
+                session = await get_session(slot.proxy)
+                pending.append((url, fetch_offer(session, url, slot, pool, stats, cfg)))
 
-            session = await get_session(slot.proxy)
-            result = await fetch_offer(session, url, slot, pool, stats, cfg)
+            if pending:
+                results = await asyncio.gather(
+                    *[coro for _, coro in pending], return_exceptions=True
+                )
+                for (url, _), result in zip(pending, results):
+                    if isinstance(result, Exception):
+                        await retry_queue.put(url)
+                    elif result is None:
+                        await retry_queue.put(url)
+                    elif result == "skipped":
+                        seen_urls.add(url)
+                    else:
+                        rows, timings, similar_urls = result
+                        timings["worker"] = name
+                        await row_queue.put((rows, timings))
+                        stats["parsed"] = stats.get("parsed", 0) + 1
+                        for sim_url in similar_urls:
+                            sim_id = _cid(sim_url)
+                            if sim_id and sim_url not in skip_urls_set and sim_id not in seen_urls:
+                                seen_urls.add(sim_id)
+                                url_queue.put_nowait(sim_url)
+                                stats["similar_found"] = stats.get("similar_found", 0) + 1
 
-            if result is None:
-                await retry_queue.put(url)
-            elif result == "skipped":
-                seen_urls.add(url)
-            else:
-                rows, timings, similar_urls = result
-                timings["worker"] = name
-                await row_queue.put((rows, timings))
-                stats["parsed"] = stats.get("parsed", 0) + 1
-                for sim_url in similar_urls:
-                    if sim_url not in skip_urls_set and sim_url not in seen_urls:
-                        seen_urls.add(sim_url)
-                        try:
-                            url_queue.put_nowait(sim_url)
-                            stats["similar_found"] = stats.get("similar_found", 0) + 1
-                        except asyncio.QueueFull:
-                            break
-
-            # полный цикл worker'а
             cycle_ms = (time.monotonic() - t_cycle) * 1000
             stats["cycle_ms_total"] = stats.get("cycle_ms_total", 0) + cycle_ms
             stats["cycle_count"] = stats.get("cycle_count", 0) + 1
@@ -266,9 +306,11 @@ async def fetch_listing(session, url, slot, pool, stats, cfg):
             continue
         href = a["href"].split("?")[0]
         if any(part in href for part in skip_urls):
+            stats["listing_skip_url"] = stats.get("listing_skip_url", 0) + 1
             continue
         text = card.get_text().lower()
         if any(phrase in text for phrase in skip_phrases):
+            stats["listing_skip_phrase"] = stats.get("listing_skip_phrase", 0) + 1
             continue
 
         # цена из текста
@@ -281,6 +323,7 @@ async def fetch_listing(session, url, slot, pool, stats, cfg):
 
         results.append((href, price))
 
+    stats["listing_cards_total"] = stats.get("listing_cards_total", 0) + len(cards)
     return results
 
 
@@ -329,7 +372,7 @@ async def http_listing_worker(
     try:
         for fi, filt in enumerate(filters):
             label = filt["label"]
-            log.info(f"[{name}] FILTER {fi+1}/{len(filters)}: {label}")
+            log.debug(f"[{name}] FILTER {fi+1}/{len(filters)}: {label}")
             consecutive_cached = 0
             pg = 1
 
@@ -355,43 +398,43 @@ async def http_listing_worker(
                 cached = 0
                 touched = 0
                 for href, card_price in result:
-                    if href in seen:
-                        cached += 1
+                    cid = _cid(href)
+                    if not cid:
                         continue
-                    seen.add(href)
 
-                    # цена совпадает с кешем, достаточно touch
-                    if listing_cache and card_price:
-                        from scraper.parsers import extract_cian_id
-                        cid = extract_cian_id(href)
-                        if cid and cid in listing_cache:
-                            old_price = listing_cache[cid].get("price")
-                            if old_price and old_price == card_price:
-                                # та же цена, не надо полный fetch
-                                listing_cache[cid]["_touched"] = True
-                                touched += 1
-                                stats["touched"] = stats.get("touched", 0) + 1
-                                continue
+                    if cid in seen:
+                        # уже знаем это объявление, помечаем как активное
+                        if listing_cache and cid in listing_cache:
+                            listing_cache[cid]["_touched"] = True
+                        cached += 1
+                        stats["listing_cached"] = stats.get("listing_cached", 0) + 1
+                        continue
+                    seen.add(cid)
 
+                    # новый cid, проверяем нужен ли полный fetch
+                    if listing_cache and card_price and cid in listing_cache:
+                        old_price = listing_cache[cid].get("price")
+                        if old_price and old_price == card_price:
+                            # та же цена, достаточно touch
+                            listing_cache[cid]["_touched"] = True
+                            touched += 1
+                            stats["touched"] = stats.get("touched", 0) + 1
+                            continue
+
+                    # новое объявление или цена изменилась
                     await url_queue.put(href)
                     new_count += 1
 
                 log.debug(
                     f"[{name}] {label} p.{pg}: cards={len(result)} new={new_count} "
-                    f"cached={cached} | queue={url_queue.qsize()}"
+                    f"cached={cached} touched={touched} | queue={url_queue.qsize()}"
                 )
 
-                # backpressure: тормозим листинг когда очередь заполняется
-                qmax = url_queue.maxsize or 15000
-                fill = url_queue.qsize() / qmax if qmax else 0
-                if fill > 0.8:
-                    await asyncio.sleep(3)
-                elif fill > 0.5:
-                    await asyncio.sleep(1)
-
-                if pg == 1 and new_count < min_new and new_count + cached < 20:
+                if pg == 1 and new_count < min_new and new_count + cached + touched < 20:
                     break
 
+                # продолжаем только если нашлись реально новые URL-ы
+                # touch полезен, но не повод прокручивать все 54 страницы
                 if new_count == 0:
                     consecutive_cached += 1
                     if consecutive_cached >= max_cached:
@@ -402,7 +445,8 @@ async def http_listing_worker(
                 pg += 1
 
             completed.append(label)
-            log.info(f"[{name}] DONE: {label}")
+            stats["filters_done"] = stats.get("filters_done", 0) + 1
+            log.debug(f"[{name}] DONE: {label}")
     finally:
         if shared_sessions is None:
             for s in sessions.values():

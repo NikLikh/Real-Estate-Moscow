@@ -21,7 +21,7 @@ def _diff_and_update(pool: HttpPool, discovered: list[tuple[str, str, str]], sou
             # слот уже есть, сбрасываем cooldown если прокси жив
             pool.reset_cooldown(label)
     if added:
-        log.info(f"[REFRESH] {source}: +{added} new, total {pool.slot_count} slots")
+        log.debug(f"[REFRESH] {source}: +{added} new, total {pool.slot_count} slots")
     return added
 
 
@@ -40,7 +40,7 @@ async def _check_existing_slots(pool: HttpPool, source_prefix: str):
             ip = await check_connectivity(proxy=slot.proxy, timeout=5)
             if not ip:
                 pool.remove_slot(label)
-                log.info(f"[REFRESH] removed dead slot {label}")
+                log.debug(f"[REFRESH] removed dead slot {label}")
                 return
             cian_ok = await check_cian(proxy=slot.proxy, timeout=10)
             if not cian_ok:
@@ -112,9 +112,9 @@ async def run_refresher(pool: HttpPool, cfg: dict):
         while True:
             await asyncio.sleep(light_interval)
             try:
-                log.info(f"[REFRESH] light cycle, pool: {pool.alive}/{pool.slot_count} alive")
+                log.debug(f"[REFRESH] light cycle, pool: {pool.alive}/{pool.slot_count} alive")
                 await _light_cycle(pool, cfg)
-                log.info(f"[REFRESH] light done, pool: {pool.alive}/{pool.slot_count} alive")
+                log.debug(f"[REFRESH] light done, pool: {pool.alive}/{pool.slot_count} alive")
             except Exception as e:
                 log.warning(f"[REFRESH] light cycle error: {e}")
 
@@ -122,9 +122,9 @@ async def run_refresher(pool: HttpPool, cfg: dict):
         while True:
             await asyncio.sleep(heavy_interval)
             try:
-                log.info(f"[REFRESH] heavy cycle (browsec), pool: {pool.alive}/{pool.slot_count}")
+                log.debug(f"[REFRESH] heavy cycle (browsec), pool: {pool.alive}/{pool.slot_count}")
                 await _heavy_cycle(pool, cfg)
-                log.info(f"[REFRESH] heavy done, pool: {pool.alive}/{pool.slot_count} alive")
+                log.debug(f"[REFRESH] heavy done, pool: {pool.alive}/{pool.slot_count} alive")
             except Exception as e:
                 log.warning(f"[REFRESH] heavy cycle error: {e}")
 

@@ -9,6 +9,11 @@ from scraper.runtime import load_checkpoint, save_checkpoint
 log = logging.getLogger("re")
 
 
+def _extract_cid(href):
+    m = re.search(r'/flat/(\d+)', href)
+    return int(m.group(1)) if m else None
+
+
 def build_filters_from_config(cfg=None):
     cfg = cfg or load_scraper_config()
     base = cfg["cian_base"]
@@ -127,7 +132,7 @@ def _derive_filter(parent, new_lo, new_hi, cfg):
     }
 
 
-async def _http_check_count(pool, url, cfg, max_retries=3):
+async def _http_check_count(pool, url, cfg, max_retries=10):
     from curl_cffi.requests import AsyncSession
     from proxy_farm.detector import headers as _headers, is_waf as _is_waf, is_captcha as _is_captcha
     from scraper.http_offers import parse_listing_urls
@@ -144,17 +149,16 @@ async def _http_check_count(pool, url, cfg, max_retries=3):
             ) as s:
                 resp = await s.get(f"{url}&p=1", headers=_headers(), timeout=15)
         except Exception:
-            await asyncio.sleep(2)
+            # сетевая ошибка, cooldown чтобы следующий acquire дал другой IP
+            pool.report_waf(slot, 10)
             continue
 
         if _is_waf(resp.text, resp.status_code):
             pool.report_waf(slot, 30)
-            await asyncio.sleep(2)
             continue
 
         if _is_captcha(resp.text, str(resp.url)):
             pool.report_waf(slot, 60)
-            await asyncio.sleep(3)
             continue
 
         pool.report_ok(slot)
@@ -173,7 +177,9 @@ async def _http_maybe_split(pool, filt, max_offers, min_split, cfg, early_urls=N
     hi = filt["price_hi"]
 
     if count is None:
-        log.info(f"  {filt['label']}: count unknown, оставляем как есть")
+        # не знаем сколько, но листинг обойдёт до 54 страниц = 1512 карточек
+        filt["offer_count"] = 54 * 28
+        log.info(f"  {filt['label']}: count unknown, ставим {filt['offer_count']} (max pages)")
         return [filt]
 
     filt["offer_count"] = count
@@ -195,10 +201,12 @@ async def _http_maybe_split(pool, filt, max_offers, min_split, cfg, early_urls=N
     left = _derive_filter(filt, lo, mid, cfg)
     right = _derive_filter(filt, mid, hi, cfg)
 
-    result = []
-    for sub in [left, right]:
-        result.extend(await _http_maybe_split(pool, sub, max_offers, min_split, cfg))
-    return result
+    # дробим обе половины параллельно
+    left_res, right_res = await asyncio.gather(
+        _http_maybe_split(pool, left, max_offers, min_split, cfg),
+        _http_maybe_split(pool, right, max_offers, min_split, cfg),
+    )
+    return left_res + right_res
 
 
 async def http_plan_filters(pool, cfg=None, url_queue=None, seen=None):
@@ -235,10 +243,11 @@ async def http_plan_filters(pool, cfg=None, url_queue=None, seen=None):
     if url_queue and early_urls:
         added = 0
         for href in early_urls:
-            if seen is not None and href in seen:
+            cid = _extract_cid(href)
+            if seen is not None and cid and cid in seen:
                 continue
-            if seen is not None:
-                seen.add(href)
+            if seen is not None and cid:
+                seen.add(cid)
             try:
                 url_queue.put_nowait(href)
                 added += 1

@@ -55,14 +55,7 @@ EXTENSIONS = {
     },
     "cyberghost": {
         "webstore_id": "ffbkglfijbcbgblgflchnbphjdllaogb",
-        # серверы в статическом assets/server_list.json, browser launch не нужен
-        # nodes работают как HTTPS CONNECT proxy на порту 9002
-        # 4 страны (RO, NL, DE, US), ~36 уникальных IP
     },
-    # urban_vpn: popup рендерит SPA, не инициализируется без UI. сложная DI-архитектура,
-    #   connect через внутренний message bus, серверы через remote API (planetProvider)
-    # windscribe: требует аккаунт (login), 10GB/мес free
-    # оба не годятся для безаккаунтной автоматизации
 }
 
 # temp dirs для persistent context, чистим при shutdown
@@ -215,11 +208,13 @@ async def _wait_for_pac(bg, ext_name, timeout=15):
     deadline = asyncio.get_event_loop().time() + timeout
     while asyncio.get_event_loop().time() < deadline:
         try:
-            has_pac = await bg.evaluate("""async () => {
+            has_pac = await bg.evaluate(
+                """async () => {
                 const items = await new Promise(r => chrome.storage.local.get('lowLevelPac', r));
                 const pac = items['lowLevelPac'];
                 return !!(pac && pac.countries && Object.keys(pac.countries).length > 0);
-            }""")
+            }"""
+            )
             if has_pac:
                 return True
         except Exception:
@@ -231,12 +226,14 @@ async def _wait_for_pac(bg, ext_name, timeout=15):
 
 async def get_available_countries(bg, ext_name):
     try:
-        countries = await bg.evaluate("""async () => {
+        countries = await bg.evaluate(
+            """async () => {
             const items = await new Promise(r => chrome.storage.local.get('lowLevelPac', r));
             const pac = items['lowLevelPac'];
             if (!pac || !pac.countries) return [];
             return Object.keys(pac.countries);
-        }""")
+        }"""
+        )
         return countries or []
     except Exception as e:
         log.warning(f"[VPN] {ext_name}: failed to read countries: {e}")
@@ -301,12 +298,14 @@ async def launch_vpn_context(
 
     # принимаем consent через storage (без кликов по UI)
     try:
-        await bg.evaluate("""async () => {
+        await bg.evaluate(
+            """async () => {
             await new Promise(r => chrome.storage.local.set({
                 'agreed': true, 'termsAccepted': true,
                 'onboardingCompleted': true, 'consent': true
             }, r));
-        }""")
+        }"""
+        )
     except Exception:
         pass
 

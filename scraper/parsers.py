@@ -511,11 +511,36 @@ def _map_json_to_fields(j: dict) -> dict:
         "is_new_building": nb.get("isFromDeveloper") or nb.get("isFromBuilder"),
         "developer": nb.get("name") if nb.get("name") else None,
         "residential_complex": jk.get("name") if jk.get("name") else None,
-        "completion_date": None,
+        "completion_date": _extract_completion_date(j),
         "description": j.get("description"),
         "publication_date": j.get("creationDate"),
         "phone_protected": None,
     }
+
+
+def _extract_completion_date(j: dict) -> str | None:
+    """дата сдачи из building.deadline или newbuilding.house.finishDate"""
+    quarter_names = {"first": 1, "second": 2, "third": 3, "fourth": 4}
+
+    # building.deadline = {year, quarter, quarterEnd, isComplete}
+    dl = (j.get("building") or {}).get("deadline") or {}
+    if dl.get("year"):
+        q = dl.get("quarter", "")
+        qn = quarter_names.get(q, q) if isinstance(q, str) else q
+        return f"{qn} кв. {dl['year']}" if qn else str(dl["year"])
+
+    # newbuilding.house.finishDate = {quarter, year}
+    fd = ((j.get("newbuilding") or {}).get("house") or {}).get("finishDate") or {}
+    if fd.get("year"):
+        q = fd.get("quarter")
+        return f"{q} кв. {fd['year']}" if q else str(fd["year"])
+
+    # newbuilding.newbuildingFeatures.deadlineInfo = "Сдача в 2026-2028"
+    info = ((j.get("newbuilding") or {}).get("newbuildingFeatures") or {}).get("deadlineInfo")
+    if info:
+        return info
+
+    return None
 
 
 def _parse_address_from_json(items: list) -> dict:
