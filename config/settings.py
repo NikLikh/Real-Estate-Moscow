@@ -7,7 +7,7 @@ from dotenv import load_dotenv
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
-# .env обязателен для DB_USER/DB_PASSWORD, остальное имеет dev-дефолты
+
 load_dotenv(PROJECT_ROOT / ".env")
 
 DB_CONFIG = {
@@ -18,7 +18,6 @@ DB_CONFIG = {
     "password": os.getenv("DB_PASSWORD", ""),
 }
 
-# pyspark пишет в ту же БД через JDBC
 JDBC_URL = (
     f"jdbc:postgresql://{DB_CONFIG['host']}:{DB_CONFIG['port']}/{DB_CONFIG['dbname']}"
 )
@@ -28,13 +27,11 @@ JDBC_PROPS = {
     "driver": "org.postgresql.Driver",
 }
 
-# java/spark не работает с кириллицей в пути, используем алиас Nikita
 _jars = PROJECT_ROOT / "jars" / "postgresql-42.7.4.jar"
 JARS_PATH = (
     str(_jars).replace("Никита", "Nikita") if "Никита" in str(_jars) else str(_jars)
 )
 
-# LOG_LEVEL=DEBUG для подробных логов, INFO (default) для компактной status line
 _log_level = os.getenv("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(
     level=getattr(logging, _log_level, logging.INFO),
@@ -79,7 +76,6 @@ def _apply_scraper_env_overrides(cfg):
         "web_proxy_enabled": _env_bool("SCRAPER_WEB_PROXY_ENABLED"),
         "vless_socks_port": _env_int("VLESS_SOCKS_PORT")
         or _env_int("SCRAPER_VLESS_SOCKS_PORT"),
-        "vds_socks_port": _env_int("SCRAPER_VDS_SOCKS_PORT"),
         "runtime_endpoint_types": _env_csv("SCRAPER_RUNTIME_ENDPOINT_TYPES"),
         "experimental_endpoint_types": _env_csv("SCRAPER_EXPERIMENTAL_ENDPOINT_TYPES"),
     }

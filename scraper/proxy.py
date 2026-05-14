@@ -1,10 +1,7 @@
 import asyncio
 import logging
-import os
 import socket
-import subprocess
 import time
-from pathlib import Path
 from urllib.parse import urlparse
 
 from scraper.browser import (
@@ -662,23 +659,6 @@ def _discover_local_proxy_candidates(cfg):
             )
         )
 
-    vds_port = int(cfg.get("vds_socks_port", 9080))
-    if EndpointKind.PROXY.value in runtime_types and _port_open("127.0.0.1", vds_port):
-        candidates.append(
-            _normalize_endpoint(
-                {
-                    "name": "vds",
-                    "proxy": f"socks5://127.0.0.1:{vds_port}",
-                    "rate_limit": 3.0,
-                    "type": EndpointKind.PROXY.value,
-                    "kind": EndpointKind.PROXY.value,
-                    "driver": EndpointDriver.NATIVE.value,
-                    "slot_class": "socks5",
-                    "policy": _endpoint_policy(cfg, 3.0),
-                }
-            )
-        )
-
     return candidates
 
 
@@ -907,77 +887,3 @@ async def resolve_runtime_endpoints(cfg):
 
 async def auto_discover(cfg):
     return await resolve_runtime_endpoints(cfg)
-
-
-_vds_proc = None
-
-
-def ensure_vds_tunnel(cfg):
-    global _vds_proc
-
-    host = os.getenv("VDS_HOST", "")
-    user = os.getenv("VDS_USER", "")
-    if not host or not user:
-        return
-
-    port = int(cfg.get("vds_socks_port", 9080))
-    if _port_open("127.0.0.1", port):
-        log.info(f"[VDS] tunnel already on :{port}")
-        return
-
-    if not _port_open(host, 22, timeout=5):
-        log.info(f"[VDS] {host}:22 unreachable, skip")
-        return
-
-    key_paths = [
-        Path.home() / ".ssh" / "id_ed25519",
-    ]
-    key = next((p for p in key_paths if p.exists()), None)
-    if not key:
-        log.info("[VDS] no SSH key, skip (ssh-keygen -t ed25519)")
-        return
-
-    cmd = [
-        "ssh",
-        "-D",
-        str(port),
-        "-N",
-        "-o",
-        "StrictHostKeyChecking=no",
-        "-o",
-        "ServerAliveInterval=30",
-        "-o",
-        "ExitOnForwardFailure=yes",
-        "-i",
-        str(key),
-        f"{user}@{host}",
-    ]
-
-    log.info(f"[VDS] starting tunnel to {host} on :{port}...")
-    _vds_proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-
-    deadline = time.monotonic() + 10
-    while time.monotonic() < deadline:
-        if _port_open("127.0.0.1", port):
-            log.info(f"[VDS] tunnel ready on :{port}")
-            return
-        time.sleep(0.5)
-
-    log.warning("[VDS] tunnel failed to start")
-    try:
-        _vds_proc.terminate()
-    except Exception:
-        pass
-    _vds_proc = None
-
-
-def stop_vds_tunnel():
-    global _vds_proc
-    if _vds_proc:
-        log.info("[VDS] stopping tunnel")
-        try:
-            _vds_proc.terminate()
-            _vds_proc.wait(timeout=5)
-        except Exception:
-            pass
-        _vds_proc = None

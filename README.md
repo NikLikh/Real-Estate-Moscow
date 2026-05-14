@@ -7,9 +7,8 @@
 ```
 config/          конфиг проекта, .env, scraper.yaml
 db/              PostgreSQL: схема, пул, CRUD, загрузчики kaggle
-scraper/         парсеры cian.ru и наш.дом.рф
+scraper/         парсер cian.ru
 notebooks/       Jupyter-ноутбуки (предобработка, анализ)
-tests/           юнит-тесты
 data/            гео-справочники (округа, районы, метро)
 jars/            Spark JDBC driver
 ```
@@ -19,11 +18,10 @@ jars/            Spark JDBC driver
 ```bash
 source .venv/Scripts/activate
 cp .env.example .env               # заполнить credentials
-docker compose up -d                # MinIO + PostgreSQL
-cat db/init.sql | docker exec -i postgres psql -U user -d real_estate
+docker compose up -d                # PostgreSQL
+python -m db.apply                  # развернуть схему БД
 
 python main.py scrape cian          # парсинг cian.ru (скорость ~10000 объявлений в час до вылета rate_limit)
-python main.py scrape domrf         # парсинг наш.дом.рф
 python main.py load kaggle          # загрузка 6 kaggle-датасетов (Spark)
 python main.py load angultiaev      # загрузка angultiaev 162GB (remotezip)
 ```
@@ -41,14 +39,12 @@ python main.py load angultiaev      # загрузка angultiaev 162GB (remotez
 
 **Текущие**
 - cian.ru (вторичка и новостройки)
-- наш.дом.рф (новостройки)
 
 ## Прокси (опционально)
 
 Парсер работает через direct IP из коробки. Для обхода rate limit можно подключить дополнительные endpoints, при запуске `auto_discover` проверит доступные и оставит уникальные IP:
 
 - **VLESS/V2Ray** - любой SOCKS5 прокси. Указать порт в `.env` (`VLESS_SOCKS_PORT`) и `config/scraper.yaml` (`vless_socks_port`)
-- **VDS SSH tunnel** - SOCKS5 через SSH. Указать `VDS_HOST`, `VDS_USER` в `.env`, туннель поднимется автоматически. Первый раз настроить SSH-ключ: `ssh-keygen -t ed25519 && ssh-copy-id user@host`
 
 Без прокси парсер будет работать медленнее из-за rate limit на один IP, но всё равно соберёт данные.
 
@@ -56,4 +52,4 @@ python main.py load angultiaev      # загрузка angultiaev 162GB (remotez
 
 - Python 3.13, pandas, numpy, scikit-learn, PySpark
 - Patchright (Playwright fork), BeautifulSoup
-- PostgreSQL 16, MinIO, Docker Compose
+- PostgreSQL 16, Docker Compose

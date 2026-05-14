@@ -255,57 +255,15 @@ def insert_daily_snapshot() -> int:
     conn = get_conn()
     try:
         cur = conn.cursor()
-
-        # месячная партиция
-        now = datetime.now()
-        y, m = now.year, now.month
-        nm = m + 1 if m < 12 else 1
-        ny = y if m < 12 else y + 1
-        part_name = f"listings_archive_{y}_{m:02d}"
-        cur.execute(
-            "SELECT EXISTS (SELECT 1 FROM pg_class WHERE relname = %s)", (part_name,)
-        )
-        if not cur.fetchone()[0]:
-            cur.execute(
-                f"CREATE TABLE {part_name} PARTITION OF listings_archive "
-                f"FOR VALUES FROM ('{y}-{m:02d}-01') TO ('{ny}-{nm:02d}-01')"
-            )
-
         cur.execute("""
-            INSERT INTO listings_archive (
-                cian_id, url, price, price_per_m2, deal_conditions,
-                region, municipality, district, microdistrict, street, house, lat, lon,
-                metro_stations,
-                rooms, total_area, living_area, kitchen_area,
-                floor, total_floors, ceiling_height,
-                renovation, bathrooms, balcony, window_view, is_apartments,
-                year_built, building_type, parking,
-                is_new_building, developer, residential_complex, completion_date,
-                description, publication_date,
-                seller_type, phone_protected,
-                is_active, first_seen_at, last_seen_at, updated_at, consecutive_misses,
-                snapshot_date
-            )
-            SELECT
-                cian_id, url, price, price_per_m2, deal_conditions,
-                region, municipality, district, microdistrict, street, house, lat, lon,
-                metro_stations,
-                rooms, total_area, living_area, kitchen_area,
-                floor, total_floors, ceiling_height,
-                renovation, bathrooms, balcony, window_view, is_apartments,
-                year_built, building_type, parking,
-                is_new_building, developer, residential_complex, completion_date,
-                description, publication_date,
-                seller_type, phone_protected,
-                is_active, first_seen_at, last_seen_at, updated_at, consecutive_misses,
-                CURRENT_DATE
-            FROM listings WHERE is_active
+            INSERT INTO listings_archive
+            SELECT l.*, CURRENT_DATE FROM listings l WHERE is_active
             ON CONFLICT (cian_id, snapshot_date) DO NOTHING
         """)
         count = cur.rowcount
         conn.commit()
         cur.close()
-        log.info(f"daily snapshot: {count} listings archived for {now.date()}")
+        log.info(f"daily snapshot: {count} listings archived for {datetime.now().date()}")
         return count
     except Exception as e:
         conn.rollback()
@@ -320,52 +278,10 @@ def archive_inactive() -> int:
     conn = get_conn()
     try:
         cur = conn.cursor()
-
-        # месячная партиция
-        now = datetime.now()
-        y, m = now.year, now.month
-        nm = m + 1 if m < 12 else 1
-        ny = y if m < 12 else y + 1
-        part_name = f"listings_archive_{y}_{m:02d}"
-        cur.execute(
-            "SELECT EXISTS (SELECT 1 FROM pg_class WHERE relname = %s)", (part_name,)
-        )
-        if not cur.fetchone()[0]:
-            cur.execute(
-                f"CREATE TABLE {part_name} PARTITION OF listings_archive "
-                f"FOR VALUES FROM ('{y}-{m:02d}-01') TO ('{ny}-{nm:02d}-01')"
-            )
-
         # snapshot_date = дата последнего обновления (когда объявление было ещё живым)
         cur.execute("""
-            INSERT INTO listings_archive (
-                cian_id, url, price, price_per_m2, deal_conditions,
-                region, municipality, district, microdistrict, street, house, lat, lon,
-                metro_stations,
-                rooms, total_area, living_area, kitchen_area,
-                floor, total_floors, ceiling_height,
-                renovation, bathrooms, balcony, window_view, is_apartments,
-                year_built, building_type, parking,
-                is_new_building, developer, residential_complex, completion_date,
-                description, publication_date,
-                seller_type, phone_protected,
-                is_active, first_seen_at, last_seen_at, updated_at, consecutive_misses,
-                snapshot_date
-            )
-            SELECT
-                cian_id, url, price, price_per_m2, deal_conditions,
-                region, municipality, district, microdistrict, street, house, lat, lon,
-                metro_stations,
-                rooms, total_area, living_area, kitchen_area,
-                floor, total_floors, ceiling_height,
-                renovation, bathrooms, balcony, window_view, is_apartments,
-                year_built, building_type, parking,
-                is_new_building, developer, residential_complex, completion_date,
-                description, publication_date,
-                seller_type, phone_protected,
-                is_active, first_seen_at, last_seen_at, updated_at, consecutive_misses,
-                updated_at::date
-            FROM listings WHERE NOT is_active
+            INSERT INTO listings_archive
+            SELECT l.*, updated_at::date FROM listings l WHERE NOT is_active
             ON CONFLICT (cian_id, snapshot_date) DO NOTHING
         """)
         archived = cur.rowcount

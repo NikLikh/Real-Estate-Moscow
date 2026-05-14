@@ -14,11 +14,5 @@ jars
 data
 .env
 .env.*
-.tor_data
 extensions/*/
 !extensions/.gitkeep
-tools/
-tests/
-extensions
-docs/
-notebooks

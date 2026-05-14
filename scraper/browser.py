@@ -159,34 +159,6 @@ _stealth = Stealth(
     navigator_languages_override=["ru-RU", "ru", "en-US", "en"],
 )
 
-# domrf: ServicePipe детектит http2/gpu флаги, headed hidden вместо headless
-CHROMIUM_ARGS_DOMRF = [
-    "--disable-blink-features=AutomationControlled",
-    "--no-first-run",
-    "--no-default-browser-check",
-    "--window-position=-32000,-32000",
-    "--disable-dev-shm-usage",
-    "--disable-background-networking",
-    "--disable-sync",
-    "--disable-translate",
-    "--disable-notifications",
-    "--disable-default-apps",
-    "--disable-popup-blocking",
-    "--no-sandbox",
-    "--disable-infobars",
-    "--disable-session-crashed-bubble",
-    "--disable-features=TranslateUI",
-    "--metrics-recording-only",
-    "--mute-audio",
-]
-
-
-async def launch_domrf_browser(playwright) -> Browser:
-    return await playwright.chromium.launch(
-        headless=False,
-        args=CHROMIUM_ARGS_DOMRF,
-    )
-
 
 async def launch_stealth_browser(playwright, headless=False) -> Browser:
     return await playwright.chromium.launch(
