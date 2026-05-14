@@ -1,6 +1,5 @@
 import asyncio
 import logging
-import socket
 import time
 from urllib.parse import urlparse
 
@@ -292,15 +291,6 @@ class ProxyPool:
 
     async def __aexit__(self, *exc):
         pass
-
-
-def _port_open(host, port, timeout=2):
-    try:
-        s = socket.create_connection((host, port), timeout=timeout)
-        s.close()
-        return True
-    except (socket.timeout, ConnectionRefusedError, OSError):
-        return False
 
 
 async def _resolve_public_ip(ctx, timeout=10000):
@@ -635,25 +625,6 @@ def _discover_local_proxy_candidates(cfg):
                     "kind": EndpointKind.DIRECT.value,
                     "driver": EndpointDriver.NATIVE.value,
                     "slot_class": "direct",
-                    "policy": _endpoint_policy(cfg, 4.0),
-                }
-            )
-        )
-
-    vless_port = int(cfg.get("vless_socks_port", 10808))
-    if EndpointKind.PROXY.value in runtime_types and _port_open(
-        "127.0.0.1", vless_port
-    ):
-        candidates.append(
-            _normalize_endpoint(
-                {
-                    "name": "vless",
-                    "proxy": f"socks5://127.0.0.1:{vless_port}",
-                    "rate_limit": 4.0,
-                    "type": EndpointKind.PROXY.value,
-                    "kind": EndpointKind.PROXY.value,
-                    "driver": EndpointDriver.NATIVE.value,
-                    "slot_class": "socks5",
                     "policy": _endpoint_policy(cfg, 4.0),
                 }
             )

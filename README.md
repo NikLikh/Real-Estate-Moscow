@@ -1,55 +1,67 @@
 # Real Estate in Russia
 
-Анализ рынка недвижимости Москвы и МО: сбор данных, обогащение, анализ цен и трендов.
+Сбор и анализ рынка недвижимости Москвы и МО. Скрапер cian.ru пишет в PostgreSQL, отдельно подтягиваются исторические датасеты с Kaggle.
 
 ## Структура
 
 ```
-config/          конфиг проекта, .env, scraper.yaml
-db/              PostgreSQL: схема, пул, CRUD, загрузчики kaggle
+config/          .env, scraper.yaml, settings.py
+db/              схема, пул, репозиторий, загрузчики kaggle
 scraper/         парсер cian.ru
-notebooks/       Jupyter-ноутбуки (предобработка, анализ)
+proxy_farm/      пул прокси и источники (browsec, cyberghost, 1clickvpn, monosans)
+extensions/      браузерные VPN-расширения для прокси-пула
+notebooks/       Jupyter (preprocessing, анализ)
 data/            гео-справочники (округа, районы, метро)
-jars/            Spark JDBC driver
+jars/            JDBC-драйвер для Spark
 ```
 
 ## Запуск
 
 ```bash
 source .venv/Scripts/activate
-cp .env.example .env               # заполнить credentials
+cp .env.example .env               # вписать credentials
 docker compose up -d                # PostgreSQL
-python -m db.apply                  # развернуть схему БД
+python -m db.apply                  # развернуть схему
 
-python main.py scrape cian          # парсинг cian.ru (скорость ~10000 объявлений в час до вылета rate_limit)
-python main.py load kaggle          # загрузка 6 kaggle-датасетов (Spark)
-python main.py load angultiaev      # загрузка angultiaev 162GB (remotezip)
+python main.py scrape                # парсинг cian в цикле
+python main.py scrape --once         # один прогон без цикла
+python main.py load kaggle           # загрузить датасеты с Kaggle
+python main.py load angultiaev       # отдельно — angultiaev 162GB через remotezip
 ```
 
-## Источники данных
+Скорость парсинга — около 10K объявлений в час до того, как WAF циана начнёт резать. С прокси можно выше.
 
-**Исторические (Kaggle)**
+## БД
+
+Четыре таблицы:
+
+- `listings` — живой срез, один ряд на объявление, PK по `cian_id`, lifecycle-поля (`is_active`, `last_seen_at`, `consecutive_misses`).
+- `price_history` — append-only лог цен, ловит изменения между прогонами + историю из html.
+- `listings_archive` — снапшоты и архивированные неактивные объявления, PK `(cian_id, snapshot_date)`.
+- `kaggle_flats` — исторические датасеты, разные источники в одной таблице через колонку `source`.
+
+`python -m db.apply` идемпотентный — гоняет все `db/schema/**/*.sql` через `CREATE ... IF NOT EXISTS`.
+
+## Источники
+
+Исторические (Kaggle):
 - mrdaniilak/russia-real-estate-20182021
 - mrdaniilak/russia-real-estate-2021
 - egorkainov/moscow-housing-price-dataset
 - romanbaster/sale-and-rental-of-russian-real-estate-in-4-cities
 - ivan314sh/prices-of-moscow-apartments
 - hishamhaydar/moscow-2018-housing-prices
-- angultiaev/flat-sale-m24ml
+- angultiaev/flat-sale-m24ml (162GB, грузится отдельной командой через remotezip)
 
-**Текущие**
-- cian.ru (вторичка и новостройки)
+Текущие:
+- cian.ru — вторичка и новостройки Москвы и МО.
 
-## Прокси (опционально)
+## Прокси
 
-Парсер работает через direct IP из коробки. Для обхода rate limit можно подключить дополнительные endpoints, при запуске `auto_discover` проверит доступные и оставит уникальные IP:
+Из коробки парсер ходит с direct IP. Этого хватает, но медленно — циан режет один IP по rate limit.
 
-- **VLESS/V2Ray** - любой SOCKS5 прокси. Указать порт в `.env` (`VLESS_SOCKS_PORT`) и `config/scraper.yaml` (`vless_socks_port`)
-
-Без прокси парсер будет работать медленнее из-за rate limit на один IP, но всё равно соберёт данные.
+Чтобы расширить пул, `proxy_farm/` сам подтягивает прокси из browsec/cyberghost/1clickvpn/monosans, если включить нужные в `experimental_endpoint_types` в `config/scraper.yaml`. При старте `auto_discover` проверяет всех кандидатов, валидирует через cian и оставляет только живые уникальные IP.
 
 ## Стек
 
-- Python 3.13, pandas, numpy, scikit-learn, PySpark
-- Patchright (Playwright fork), BeautifulSoup
-- PostgreSQL 16, Docker Compose
+Python 3.13, PostgreSQL 16, Docker Compose. Скрапер на Patchright (форк Playwright) + curl_cffi для HTTP. Kaggle-loader на PySpark с JDBC. Анализ — pandas, numpy.

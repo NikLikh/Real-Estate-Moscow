@@ -74,8 +74,6 @@ def _apply_scraper_env_overrides(cfg):
         "headless": _env_bool("SCRAPER_HEADLESS"),
         "vpn_headless": _env_bool("SCRAPER_VPN_HEADLESS"),
         "web_proxy_enabled": _env_bool("SCRAPER_WEB_PROXY_ENABLED"),
-        "vless_socks_port": _env_int("VLESS_SOCKS_PORT")
-        or _env_int("SCRAPER_VLESS_SOCKS_PORT"),
         "runtime_endpoint_types": _env_csv("SCRAPER_RUNTIME_ENDPOINT_TYPES"),
         "experimental_endpoint_types": _env_csv("SCRAPER_EXPERIMENTAL_ENDPOINT_TYPES"),
     }

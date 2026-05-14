@@ -1,7 +1,6 @@
 cian_base: "https://www.cian.ru/cat.php?deal_type=sale&engine_version=2&offer_type=flat"
 
 auto_discover: true
-vless_socks_port: 10808
 endpoint_preflight: true
 endpoint_preflight_retries: 2
 runtime_endpoint_types: [proxy]
