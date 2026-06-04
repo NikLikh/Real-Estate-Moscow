@@ -58,9 +58,7 @@ python main.py load angultiaev       # отдельно — angultiaev 162GB ч�
 
 ## Прокси
 
-Из коробки парсер ходит с direct IP. Этого хватает, но медленно — циан режет один IP по rate limit.
-
-Чтобы расширить пул, `proxy_farm/` сам подтягивает прокси из browsec/cyberghost/1clickvpn/monosans, если включить нужные в `experimental_endpoint_types` в `config/scraper.yaml`. При старте `auto_discover` проверяет всех кандидатов, валидирует через cian и оставляет только живые уникальные IP.
+Из коробки парсер ходит с direct IP. Этого хватает, но медленно, так как циан режет один IP по rate limit, поэтому, чтобы расширить пул, `proxy_farm/` сам подтягивает прокси из browsec/cyberghost/1clickvpn/monosans, если включить нужные в `experimental_endpoint_types` в `config/scraper.yaml`. При старте `auto_discover` проверяет всех кандидатов, валидирует через cian и оставляет только живые уникальные IP. При запуске скрапера необходимо использовать VPN, так как в РФ публичные IP-адреса прокси-сервисов заблокированы
 
 ## Стек
 
