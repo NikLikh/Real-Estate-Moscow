@@ -24,7 +24,7 @@ regions:
   msk:
     id: 1
     rooms:
-      studio: "room0=1"
+      studio: "room9=1"
       1-room: "room1=1"
       2-room: "room2=1"
       3-room: "room3=1"
@@ -46,7 +46,7 @@ regions:
   mo:
     id: 4593
     rooms:
-      studio: "room0=1"
+      studio: "room9=1"
       1-room: "room1=1"
       2-room: "room2=1"
       3-room: "room3=1"

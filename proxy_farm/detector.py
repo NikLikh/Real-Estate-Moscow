@@ -6,7 +6,7 @@ WAF_RATE_LIMIT_SIGNS = ["cian_waf_block", "cian_waf_rate_limit"]
 
 CAPTCHA_SIGNS = [
     "smartcaptcha", "captcha-api.yandex", "не робот",
-    "вы не робот", "cian-captcha",
+    "вы не робот",
 ]
 
 VPN_SIGNS = [

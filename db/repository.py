@@ -12,22 +12,42 @@ log = logging.getLogger("re")
 
 LISTING_COLUMNS = [
     "cian_id", "url",
-    "price", "price_per_m2", "deal_conditions",
+    "price", "price_per_m2", "price_type", "mortgage_allowed", "deal_conditions",
     "region", "municipality", "district", "microdistrict", "street", "house", "lat", "lon",
     "metro_stations",
-    "rooms", "total_area", "living_area", "kitchen_area",
+    "rooms", "is_studio", "flat_type", "total_area", "living_area", "kitchen_area",
     "floor", "total_floors", "ceiling_height",
     "renovation", "bathrooms", "balcony", "window_view", "is_apartments",
-    "year_built", "building_type", "parking",
+    "year_built", "building_type", "parking", "passenger_lifts", "cargo_lifts",
     "is_new_building", "developer", "residential_complex", "completion_date",
-    "description", "publication_date",
-    "seller_type", "phone_protected",
+    "description", "publication_date", "edit_date",
+    "seller_type", "seller_user_type", "phone_protected",
+    "photos_count", "views_total", "views_today",
 ]
 
 _DATA_COLS = [c for c in LISTING_COLUMNS if c != "cian_id"]
 
+_BACKFILL_EXCLUDE = {"price", "url", "deal_conditions"}
+BACKFILL_COLS = [c for c in _DATA_COLS if c not in _BACKFILL_EXCLUDE]
+
+_COL_CAST = {
+    "price_per_m2": "bigint", "lat": "real", "lon": "real",
+    "metro_stations": "jsonb", "rooms": "smallint", "is_studio": "boolean",
+    "total_area": "real", "living_area": "real", "kitchen_area": "real",
+    "floor": "smallint", "total_floors": "smallint", "ceiling_height": "real",
+    "is_apartments": "boolean", "year_built": "smallint",
+    "passenger_lifts": "smallint", "cargo_lifts": "smallint",
+    "is_new_building": "boolean", "phone_protected": "boolean",
+    "mortgage_allowed": "boolean", "photos_count": "smallint",
+    "views_total": "integer", "views_today": "integer",
+}
+
 _ALL_INSERT_COLS = LISTING_COLUMNS + [
     "first_seen_at", "last_seen_at", "updated_at", "consecutive_misses",
+]
+
+_ARCHIVE_COLS = LISTING_COLUMNS + [
+    "is_active", "first_seen_at", "last_seen_at", "updated_at", "consecutive_misses",
 ]
 
 _UPSERT_SQL = """
@@ -185,6 +205,58 @@ def upsert_listings(rows: list[dict]) -> dict:
         put_conn(conn)
 
 
+def update_offer_fields(rows: list[dict]) -> dict:
+    if not rows:
+        return {"listings": 0, "archive": 0}
+
+    cleaned = []
+    for r in rows:
+        cid = r.get("cian_id")
+        if not cid:
+            continue
+        row = {"cian_id": int(cid)}
+        for c in BACKFILL_COLS:
+            val = _clean(r.get(c))
+            if c == "metro_stations" and val is not None:
+                val = Json(val)
+            row[c] = val
+        cleaned.append(row)
+    if not cleaned:
+        return {"listings": 0, "archive": 0}
+
+    set_clause = ", ".join(
+        f"{c} = data.{c}::{_COL_CAST[c]}" if c in _COL_CAST else f"{c} = data.{c}"
+        for c in BACKFILL_COLS
+    )
+    cols_sql = "cian_id, " + ", ".join(BACKFILL_COLS)
+    tmpl = "(" + ", ".join(f"%({c})s" for c in (["cian_id"] + BACKFILL_COLS)) + ")"
+
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        execute_values(cur, f"""
+            UPDATE listings AS t SET {set_clause}
+            FROM (VALUES %s) AS data ({cols_sql})
+            WHERE t.cian_id = data.cian_id
+        """, cleaned, template=tmpl)
+        n_listings = cur.rowcount
+        execute_values(cur, f"""
+            UPDATE listings_archive AS t SET {set_clause}
+            FROM (VALUES %s) AS data ({cols_sql})
+            WHERE t.cian_id = data.cian_id
+        """, cleaned, template=tmpl)
+        n_archive = cur.rowcount
+        conn.commit()
+        cur.close()
+        return {"listings": n_listings, "archive": n_archive}
+    except Exception as e:
+        conn.rollback()
+        log.error(f"update_offer_fields error: {e}")
+        return {"listings": 0, "archive": 0}
+    finally:
+        put_conn(conn)
+
+
 def get_listing_cache() -> dict[int, dict]:
     conn = get_conn()
     try:
@@ -255,9 +327,10 @@ def insert_daily_snapshot() -> int:
     conn = get_conn()
     try:
         cur = conn.cursor()
-        cur.execute("""
-            INSERT INTO listings_archive
-            SELECT l.*, CURRENT_DATE FROM listings l WHERE is_active
+        cols = ", ".join(_ARCHIVE_COLS)
+        cur.execute(f"""
+            INSERT INTO listings_archive ({cols}, snapshot_date)
+            SELECT {cols}, CURRENT_DATE FROM listings WHERE is_active
             ON CONFLICT (cian_id, snapshot_date) DO NOTHING
         """)
         count = cur.rowcount
@@ -279,9 +352,10 @@ def archive_inactive() -> int:
     try:
         cur = conn.cursor()
         # snapshot_date = дата последнего обновления (когда объявление было ещё живым)
-        cur.execute("""
-            INSERT INTO listings_archive
-            SELECT l.*, updated_at::date FROM listings l WHERE NOT is_active
+        cols = ", ".join(_ARCHIVE_COLS)
+        cur.execute(f"""
+            INSERT INTO listings_archive ({cols}, snapshot_date)
+            SELECT {cols}, updated_at::date FROM listings WHERE NOT is_active
             ON CONFLICT (cian_id, snapshot_date) DO NOTHING
         """)
         archived = cur.rowcount

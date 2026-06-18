@@ -15,6 +15,9 @@ def main():
     load_sub.add_parser("kaggle", help="датасеты kaggle")
     load_sub.add_parser("angultiaev", help="angultiaev 162GB через remotezip")
 
+    backfill = sub.add_parser("backfill", help="дотянуть новые поля по существующим cian_id")
+    backfill.add_argument("--limit", type=int, default=None)
+
     args = parser.parse_args()
 
     # ленивые импорты, чтобы не тянуть тяжелые зависимости пока не нужны
@@ -39,6 +42,11 @@ def main():
             angultiaev_main()
         else:
             load.print_help()
+
+    elif args.command == "backfill":
+        from scraper.backfill import run as backfill_run
+
+        asyncio.run(backfill_run(limit=args.limit))
 
     else:
         parser.print_help()

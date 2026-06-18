@@ -13,6 +13,11 @@ log = logging.getLogger("re")
 # captcha/waf-страницы обычно ~40K
 _CIAN_MIN_SIZE = 100_000
 
+_CIAN_CHECK_URL = (
+    "https://www.cian.ru/cat.php?deal_type=sale&engine_version=2"
+    "&offer_type=flat&region=1&room1=1&p=1"
+)
+
 
 async def check_connectivity(proxy=None, timeout=5) -> str | None:
     try:
@@ -30,12 +35,12 @@ async def check_cian(proxy=None, timeout=10) -> bool:
     try:
         async with AsyncSession(impersonate="chrome", proxy=proxy) as s:
             resp = await s.get(
-                "https://www.cian.ru/", headers=headers(), timeout=timeout
+                _CIAN_CHECK_URL, headers=headers(), timeout=timeout
             )
             html = resp.text
             if is_waf(html, resp.status_code):
                 return False
-            if is_captcha(html):
+            if is_captcha(html, str(resp.url)):
                 return False
             if is_vpn_block(html):
                 return False

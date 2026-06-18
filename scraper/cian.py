@@ -282,7 +282,7 @@ async def print_stats_periodically(
             lines.append(f"  P1 LISTING  {elapsed_min:.1f}m  ETA {p1_eta}  {fl_done}/{fl_total} filters  {cards_rate:.0f} cards/min")
             lines.append(f"  [{_bar(pct, bar_w)}] {pct:.0f}%")
             lines.append(f"  new: {qsize:,}  cached: {lst_cached:,}  skip: {lst_skip_url + lst_skip_phrase}  touch: {touched}")
-            lines.append(f"  slots: {alive}/{total_slots} ({slot_pct}%)  |  waf: {waf}  cap: {cap}  |  {mem_mb:.0f}MB")
+            lines.append(f"  slots: {alive}/{total_slots} ({slot_pct}%)  |  waf: {waf}  cap: {cap}  net: {net}  status: {bad_st}  |  {mem_mb:.0f}MB")
 
         else:
             # phase 2 / retry -- прогресс от реального размера очереди, а не от cian planned

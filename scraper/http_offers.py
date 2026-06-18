@@ -6,7 +6,7 @@ import time
 from bs4 import BeautifulSoup
 from curl_cffi.requests import AsyncSession
 
-from scraper.parsers import extract_cian_id, extract_region_id, parse_offer_page, parse_offer_from_json, parse_similar_urls_from_html
+from scraper.parsers import extract_cian_id, extract_region_id, parse_offer_from_json, parse_similar_urls_from_html
 from scraper.runtime import should_stop
 from proxy_farm.detector import is_waf, is_captcha, is_vpn_block, headers
 
@@ -80,26 +80,17 @@ async def fetch_offer(session, url, slot, pool, stats, cfg):
 
     loop = asyncio.get_event_loop()
 
-    # JSON за 1-2ms, fallback на BS4 за ~800ms
     def _timed_parse(h):
         t = time.monotonic()
         data, hist = parse_offer_from_json(h)
-        if data and data.get("price"):
-            ms = (time.monotonic() - t) * 1000
-            return (data, hist), ms, "json"
-        t2 = time.monotonic()
-        res = parse_offer_page(h)
-        ms = (time.monotonic() - t2) * 1000
-        return res, ms, "bs4"
+        ms = (time.monotonic() - t) * 1000
+        return (data, hist), ms
 
-    (data, price_history), parse_ms, method = await loop.run_in_executor(None, _timed_parse, html)
+    (data, price_history), parse_ms = await loop.run_in_executor(None, _timed_parse, html)
     stats["parse_ms_total"] = stats.get("parse_ms_total", 0) + parse_ms
     stats["parse_count"] = stats.get("parse_count", 0) + 1
-    if method == "json":
-        stats["json_hits"] = stats.get("json_hits", 0) + 1
 
-    # нет цены ни в JSON ни в BS4, ретраить бессмысленно
-    if not data.get("price"):
+    if not data or not data.get("price"):
         stats["no_price"] = stats.get("no_price", 0) + 1
         return "skipped"
 
@@ -269,6 +260,7 @@ async def fetch_listing(session, url, slot, pool, stats, cfg):
         )
     except Exception as e:
         log.debug(f"[LHTTP] {slot.label} network error: {e}")
+        stats["net_errors"] = stats.get("net_errors", 0) + 1
         return None
 
     html = resp.text
@@ -282,9 +274,16 @@ async def fetch_listing(session, url, slot, pool, stats, cfg):
 
     if is_captcha(html, str(resp.url)):
         pool.report_waf(slot, cfg.get("http_captcha_cooldown", 60))
+        stats["captchas"] = stats.get("captchas", 0) + 1
+        return None
+
+    if is_vpn_block(html):
+        pool.report_waf(slot, 60)
+        stats["vpn_blocks"] = stats.get("vpn_blocks", 0) + 1
         return None
 
     if resp.status_code != 200:
+        stats["bad_status"] = stats.get("bad_status", 0) + 1
         return None
 
     pool.report_ok(slot)
