@@ -1,0 +1,24 @@
+name: re_warehouse
+version: "1.0.0"
+profile: re_warehouse
+
+model-paths: ["models"]
+macro-paths: ["macros"]
+snapshot-paths: ["snapshots"]
+seed-paths: ["seeds"]
+test-paths: ["tests"]
+
+target-path: "target"
+clean-targets: ["target", "dbt_packages"]
+
+models:
+  re_warehouse:
+    staging:
+      +schema: stg
+      +materialized: view
+    dds:
+      +schema: dds
+      +materialized: table
+    marts:
+      +schema: marts
+      +materialized: table

@@ -58,7 +58,9 @@ regions:
       - [15_000_000, 25_000_000]
       - [25_000_000, 50_000_000]
       - [50_000_000, null]
-    object_types: null
+    object_types:
+      new: "object_type%5B0%5D=1"
+      resale: "object_type%5B0%5D=2"
 
 allowed_region_ids: [1, 4593]
 
@@ -87,13 +89,11 @@ ip_budget: 20000
 ip_budget_cooldown: 120
 
 max_pages: 54
+cards_per_page: 28
 url_queue_max: 300
-max_cached_pages: 5
-min_new_first_page: 3
 max_offers_per_filter: 1000
 min_price_split: 100_000
 
-loop_pause: 60
 max_restarts: 50
 restart_cooldown: 600
 max_worker_crashes: 20
@@ -106,6 +106,9 @@ vpn_extensions:
     rate_limit: 2.0
 
 http_listing_workers: 30
+http_listing_concurrency: 80
+api_listing_endpoint: "https://api.cian.ru/search-offers/v1/search-offers-mobile-site/"
+api_zhk_endpoint: "https://api.cian.ru/search-offers/v1/search-offers-mobile-site/"
 http_offer_workers: 60
 http_offer_batch: 3
 http_max_concurrent_per_proxy: 2

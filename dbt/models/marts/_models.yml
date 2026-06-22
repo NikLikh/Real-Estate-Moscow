@@ -1,0 +1,11 @@
+version: 2
+
+models:
+  - name: ml_listings_wide
+    columns:
+      - name: cian_id
+        tests:
+          - not_null
+      - name: days_on_market
+        tests:
+          - not_null

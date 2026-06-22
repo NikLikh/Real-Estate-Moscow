@@ -1,0 +1,12 @@
+re_warehouse:
+  target: dev
+  outputs:
+    dev:
+      type: postgres
+      host: "{{ env_var('WAREHOUSE_HOST', 'postgres') }}"
+      port: "{{ env_var('WAREHOUSE_PORT', '5432') | int }}"
+      user: "{{ env_var('WAREHOUSE_USER', 'user') }}"
+      password: "{{ env_var('WAREHOUSE_PASSWORD', 'password') }}"
+      dbname: "{{ env_var('WAREHOUSE_DB', 'real_estate') }}"
+      schema: public
+      threads: 4

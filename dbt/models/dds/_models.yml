@@ -1,0 +1,26 @@
+version: 2
+
+models:
+  - name: dim_geo
+    columns:
+      - name: geo_sk
+        tests:
+          - unique
+          - not_null
+  - name: dim_building
+    columns:
+      - name: building_sk
+        tests:
+          - unique
+          - not_null
+  - name: fact_price_change
+    columns:
+      - name: cian_id
+        tests:
+          - not_null
+  - name: fact_listing_lifecycle
+    columns:
+      - name: cian_id
+        tests:
+          - unique
+          - not_null

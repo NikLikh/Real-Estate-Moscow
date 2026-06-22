@@ -1,0 +1,11 @@
+version: 2
+
+models:
+  - name: stg_cian_observations
+    columns:
+      - name: cian_id
+        tests:
+          - not_null
+      - name: price
+        tests:
+          - not_null
