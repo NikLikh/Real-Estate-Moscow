@@ -3,6 +3,7 @@
 import asyncio
 import io
 import logging
+import random
 import shutil
 import tempfile
 import urllib.request
@@ -11,9 +12,63 @@ from pathlib import Path
 
 from playwright_stealth import Stealth
 
-from pipeline.cian.browser import CHROMIUM_ARGS_VPN, SessionIdentity
-
 log = logging.getLogger("re")
+
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36",
+]
+
+VIEWPORTS = [
+    {"width": 1920, "height": 1080},
+    {"width": 1536, "height": 864},
+    {"width": 1366, "height": 768},
+    {"width": 1440, "height": 900},
+    {"width": 1600, "height": 900},
+]
+
+
+class SessionIdentity:
+    def __init__(self, user_agent=None, viewport=None, scale=None):
+        self.user_agent = user_agent or random.choice(USER_AGENTS)
+        self.viewport = dict(viewport or random.choice(VIEWPORTS))
+        self.scale = scale if scale is not None else random.choice([1, 1.25, 1.5])
+
+
+CHROMIUM_ARGS = [
+    "--disable-blink-features=AutomationControlled",
+    "--no-first-run",
+    "--no-default-browser-check",
+    "--disable-component-extensions-with-background-pages",
+    "--blink-settings=imagesEnabled=false",
+    "--disable-http2",
+    "--no-proxy-server",
+    "--disable-gpu",
+    "--disable-dev-shm-usage",
+    "--disable-software-rasterizer",
+    "--disable-background-networking",
+    "--disable-sync",
+    "--disable-translate",
+    "--disable-notifications",
+    "--disable-default-apps",
+    "--disable-popup-blocking",
+    "--no-sandbox",
+    "--disable-infobars",
+    "--disable-session-crashed-bubble",
+    "--disable-features=TranslateUI",
+    "--metrics-recording-only",
+    "--mute-audio",
+]
+
+CHROMIUM_ARGS_VPN = [
+    a
+    for a in CHROMIUM_ARGS
+    if a
+    not in ("--disable-component-extensions-with-background-pages", "--no-proxy-server")
+]
 
 EXT_BASE = Path(__file__).resolve().parent
 

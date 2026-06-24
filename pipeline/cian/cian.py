@@ -493,11 +493,14 @@ async def _run_session(all_filters, seen, stats, cfg, t0, listing_cache=None):
                     http_pool,
                     stats,
                     cfg,
+                    seen=seen,
                 )
             )
             for _ in range(n_workers):
                 await retry_as_url.put(None)
             await retry_http
+            for u in queue_snapshot(retry_as_url):
+                await retry_queue.put(u)
 
             # если очередь не уменьшилась существенно, дальше бесполезно
             new_size = retry_queue.qsize()
@@ -545,7 +548,7 @@ async def main():
         "captchas": 0,
         "skipped": 0,
         "saved": 0,
-        "network_errors": 0,
+        "net_errors": 0,
         "waf_blocks": 0,
     }
 

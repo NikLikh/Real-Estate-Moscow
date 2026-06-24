@@ -28,8 +28,13 @@ agg as (
     group by cian_id
 ),
 bounds as (
-    select max(scraped_at)::date as last_day
-    from {{ ref('stg_cian_observations') }}
+    select max(d) as last_day
+    from (
+        select scraped_at::date as d, count(distinct cian_id) as n
+        from {{ ref('stg_cian_observations') }}
+        group by scraped_at::date
+    ) daily
+    where n >= 100000
 )
 select
     l.cian_id,

@@ -105,7 +105,7 @@ def _write_to_pg(df, label):
         df.write.mode("append")
         .option("batchsize", 5000)
         .option("numPartitions", 2)
-        .jdbc(JDBC_URL, "flats", properties=JDBC_PROPS)
+        .jdbc(JDBC_URL, "raw.kaggle_flats", properties=JDBC_PROPS)
     )
     log.info(f"[{label}] done")
 
@@ -423,7 +423,7 @@ def _get_loaded_sources():
     conn = get_conn()
     try:
         cur = conn.cursor()
-        cur.execute("SELECT DISTINCT source FROM flats WHERE source LIKE 'kaggle_%'")
+        cur.execute("SELECT DISTINCT source FROM raw.kaggle_flats WHERE source LIKE 'kaggle_%'")
         sources = {row[0] for row in cur.fetchall()}
         cur.close()
         return sources

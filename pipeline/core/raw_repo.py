@@ -32,28 +32,34 @@ def insert_observations(rows, run_id=None):
             row.append(Json(v) if c in _JSON_COLS and v is not None else v)
         values.append(row)
     conn = get_conn()
-    cur = conn.cursor()
-    execute_values(
-        cur,
-        f"INSERT INTO raw.cian_observations ({', '.join(OBS_COLS)}) VALUES %s",
-        values,
-    )
-    n = cur.rowcount
-    conn.commit()
-    cur.close()
-    put_conn(conn)
-    return n
+    try:
+        with conn.cursor() as cur:
+            execute_values(
+                cur,
+                f"INSERT INTO raw.cian_observations ({', '.join(OBS_COLS)}) VALUES %s",
+                values,
+            )
+            n = cur.rowcount
+        conn.commit()
+        return n
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        put_conn(conn)
 
 
 def get_current_state():
     conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("""
-        SELECT DISTINCT ON (cian_id) cian_id, price, scraped_at
-        FROM raw.cian_observations
-        ORDER BY cian_id, scraped_at DESC
-    """)
-    state = {row[0]: {"price": row[1], "last_seen_at": row[2]} for row in cur}
-    cur.close()
-    put_conn(conn)
-    return state
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT DISTINCT ON (cian_id) cian_id, price, scraped_at
+                FROM raw.cian_observations
+                ORDER BY cian_id, scraped_at DESC
+            """)
+            state = {row[0]: {"price": row[1], "last_seen_at": row[2]} for row in cur}
+        conn.rollback()
+        return state
+    finally:
+        put_conn(conn)

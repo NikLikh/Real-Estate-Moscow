@@ -1,38 +1,85 @@
 # Real Estate in Russia
 
-Сбор и анализ рынка недвижимости Москвы и МО. Скрапер cian.ru пишет наблюдения в PostgreSQL (append-only), dbt строит слои raw -> stg -> dds -> marts. Отдельно грузятся исторические датасеты Kaggle.
+Сбор и анализ рынка недвижимости Москвы и МО. Скрапер cian.ru пишет наблюдения в PostgreSQL (append-only), dbt строит слои raw -> stg -> dds -> marts. LightGBM скорит активные объявления на скорость продажи. Витрины отдают FastAPI + Streamlit. Отдельно грузятся исторические датасеты Kaggle.
 
 ## Структура
 
 ```
 pipeline/        Python-код проекта
   core/          инфра БД: connection, apply, raw_repo, schema/ (raw DDL)
-  cian/          парсер cian.ru, proxy_farm/, extensions/
+  cian/          парсер cian.ru, proxy_farm/, vpn_ext, extensions/
   kaggle/        загрузчики Kaggle
+  ml/            обучение и скоринг модели, фичи, экспорт
 config/          .env, scraper.yaml, settings.py
 dbt/             модели stg/dds/marts, тесты
-airflow/         DAG transform, Dockerfile
+airflow/         DAG transform/ml_train/ml_score, Dockerfile
+app/             backend (FastAPI) + frontend (Streamlit)
 notebooks/       Jupyter (preprocessing читает marts)
 data/            гео-справочники; jars/ JDBC-драйвер
 ```
+
+## Пайплайн
+
+```
+scrape -> raw.cian_observations -> dbt (stg/dds/marts) -> ml_train -> ml_score -> hot_listings -> app
+```
+
+- scrape - один прогон скрапера пишет наблюдения в raw.cian_observations
+- transform - dbt build пересобирает stg/dds/marts из raw
+- ml_train - переобучение модели на закрытых объявлениях (marts.ml_listings_wide)
+- ml_score - применение модели к активным, запись marts.hot_listings
+- app - backend читает marts и отдаёт данные frontend-у
+
+Скрапер запускает Windows Task Scheduler: нужен GUI-браузер и VPN-расширения, в Linux-контейнере их нет. Обёртка - run_scrape.bat. Остальное оркестрирует Airflow (:8080, admin/admin):
+
+- transform - @daily 20:00, dbt build
+- ml_train - еженедельно (вс 21:00), python -m pipeline.ml.train
+- ml_score - @daily 21:00, python -m pipeline.ml.score
+
+ml_score читает витрину, которую собирает transform, поэтому ставится после него. ml_train запускается реже, скоринг ежедневно берёт hot_model_latest.
 
 ## Запуск
 
 ```bash
 source .venv/Scripts/activate
 cp .env.example .env
-docker compose up -d                 # PostgreSQL + Airflow (:8080)
-python -m pipeline.core.apply        # схема raw
-
-python main.py scrape                # один прогон -> raw.cian_observations
-python main.py load kaggle           # Kaggle -> raw.kaggle_flats
-python main.py load angultiaev       # отдельный скрипт для обработки источника с .png
+docker compose up -d
+python -m pipeline.core.apply 
 ```
 
-## Расписание
+Загрузка данных:
 
-Скрапер запускает Windows Task Scheduler: нужен GUI-браузер и VPN-расширения, в Linux-контейнере их нет. Обёртка - run_scrape.bat
-Airflow (:8080, admin/admin) держит только трансформации: DAG transform (@daily) гоняет dbt build. Время ставить после скрейпа.
+```bash
+python main.py scrape 
+python main.py load kaggle
+python main.py load angultiaev
+```
+
+Трансформации и модель прогоняются в контейнерах Airflow. Через DAG-и:
+
+```bash
+docker compose exec airflow-scheduler airflow dags trigger transform
+docker compose exec airflow-scheduler airflow dags trigger ml_train
+docker compose exec airflow-scheduler airflow dags trigger ml_score
+```
+
+Либо напрямую, минуя планировщик:
+
+```bash
+docker compose exec airflow-scheduler \
+  /opt/airflow/dbt-venv/bin/dbt build --project-dir /opt/dbt --profiles-dir /opt/dbt
+docker compose exec -e PYTHONPATH=/opt/airflow airflow-scheduler \
+  /opt/airflow/ml-venv/bin/python -m pipeline.ml.train
+docker compose exec -e PYTHONPATH=/opt/airflow airflow-scheduler \
+  /opt/airflow/ml-venv/bin/python -m pipeline.ml.score
+```
+
+На машине с малым лимитом RAM (WSL) dbt стоит гнать в один поток: добавить `--threads 1`, иначе тяжёлые dds-агрегации идут параллельно и упираются в память.
+
+Приложение после ml_score:
+
+- backend - http://localhost:8000 (витрины, hot-листинги, метаданные модели)
+- frontend - http://localhost:8501 (дашборд по рынку, страница горячих объявлений)
 
 ## Слои данных
 
@@ -42,7 +89,24 @@ raw через python -m pipeline.core.apply (идемпотентно, CREATE I
 - raw.kaggle_flats - датасеты Kaggle, источник в колонке source
 - stg - типизация и чистка (stg_cian_observations)
 - dds - звезда: dim_geo, dim_building; fact_listing_lifecycle (days_on_market, event_closed), fact_price_change
-- marts - ml_listings_wide (витрина для ML), market_daily
+- marts:
+  - ml_listings_wide - одна строка на объявление, фичи и таргет для ML
+  - current_listings - активные объявления для дашборда
+  - price_index_monthly - помесячная медиана цены за метр по сегментам
+  - hot_listings - результат скоринга (пишет ml_score, не dbt)
+
+## ML-модель
+
+Задача - бинарная классификация: будет ли объявление закрыто в первые 14 дней (days_on_market < 14). Выход hot_score - вероятность быстрой продажи.
+
+- данные: marts.ml_listings_wide, обучение на закрытых объявлениях (event_closed = 1), скоринг на активных (event_closed = 0)
+- препроцессинг: sklearn Pipeline с FeatureBuilder (восстановление района по координатам, медианный импьют, ratio-фичи цены и площади), категориальные через TargetEncoder
+- модель: LGBMClassifier (1500 деревьев, learning_rate 0.03, num_leaves 127), 55 фич
+- метрики (test split 20%): pr_auc и roc_auc, пишутся в hot_model_meta.json
+- артефакты в checkpoints/: hot_model_latest.joblib, hot_model_<date>.joblib, hot_model_meta.json
+- ml_score применяет hot_model_latest к активным и пишет marts.hot_listings (cian_id, цена, price_per_m2, метро, hot_score)
+
+Цена за метр в фичах считается от первой наблюдённой цены (price_first), чтобы не утекала информация о траектории цены за всё время жизни объявления.
 
 ## Источники
 
@@ -59,8 +123,8 @@ cian.ru - вторичка и новостройки Москвы и МО.
 
 ## Прокси
 
-По умолчанию direct IP. Для расширения пула pipeline/cian/proxy_farm/ подтягивает прокси из browsec/cyberghost/1clickvpn/monosans - включаются в experimental_endpoint_types в config/scraper.yaml. auto_discover валидирует кандидатов через cian. В РФ нужен VPN: публичные IP прокси-сервисов заблокированы.
+По умолчанию direct IP. Для расширения пула pipeline/cian/proxy_farm/ подтягивает прокси из browsec/cyberghost/1clickvpn/monosans и валидирует кандидатов через cian. В РФ нужен VPN: публичные IP прокси-сервисов заблокированы.
 
 ## Стек
 
-Python 3.13, PostgreSQL 16, Docker Compose, Airflow 2.10 (LocalExecutor), dbt-postgres. Скрапер: Patchright + curl_cffi. Kaggle-loader: PySpark + JDBC. Анализ: pandas, numpy.
+Python 3.13, PostgreSQL 16, Docker Compose, Airflow 2.10 (LocalExecutor), dbt-postgres. Скрапер: Patchright + curl_cffi. Kaggle-loader: PySpark + JDBC. ML: scikit-learn, LightGBM. Приложение: FastAPI + Streamlit. Анализ: pandas, numpy.

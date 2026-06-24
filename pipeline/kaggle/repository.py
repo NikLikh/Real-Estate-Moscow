@@ -24,7 +24,7 @@ def _clean(value):
 
 COLUMNS = [
     "url", "source", "price", "price_per_m2", "discount_pct", "deal_conditions",
-    "region", "municipality", "district", "microdistrict", "street", "house", "lat", "lon",
+    "city", "region", "district", "street", "house_number", "lat", "lon",
     "metro_stations", "transport_score",
     "rooms", "total_area", "living_area", "kitchen_area",
     "floor", "total_floors", "ceiling_height",

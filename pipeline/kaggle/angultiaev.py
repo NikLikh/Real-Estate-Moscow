@@ -436,7 +436,7 @@ def _get_loaded_count() -> int:
         conn = get_conn()
         try:
             cur = conn.cursor()
-            cur.execute("SELECT COUNT(*) FROM flats WHERE source = %s", (SOURCE_NAME,))
+            cur.execute("SELECT COUNT(*) FROM raw.kaggle_flats WHERE source = %s", (SOURCE_NAME,))
             count = cur.fetchone()[0]
             cur.close()
             return count
@@ -457,7 +457,7 @@ def main():
     if existing and not loaded_ids:
         log.info(
             f"source '{SOURCE_NAME}' already in DB ({existing} rows). "
-            f"To reload: DELETE FROM flats WHERE source = '{SOURCE_NAME}'"
+            f"To reload: DELETE FROM raw.kaggle_flats WHERE source = '{SOURCE_NAME}'"
         )
         return
     if loaded_ids:

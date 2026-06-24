@@ -11,11 +11,19 @@ x-airflow-common: &airflow-common
     WAREHOUSE_PASSWORD: password
     WAREHOUSE_DB: real_estate
     DBT_PROFILES_DIR: /opt/dbt
+    DB_HOST: postgres
+    DB_PORT: "5432"
+    DB_NAME: real_estate
+    DB_USER: user
+    DB_PASSWORD: password
   volumes:
     - ./airflow/dags:/opt/airflow/dags
     - ./airflow/logs:/opt/airflow/logs
     - ./airflow/plugins:/opt/airflow/plugins
     - ./dbt:/opt/dbt
+    - ./pipeline:/opt/airflow/pipeline
+    - ./config:/opt/airflow/config
+    - ./checkpoints:/opt/airflow/checkpoints
   user: "${AIRFLOW_UID:-50000}:0"
   depends_on:
     airflow-db:
@@ -74,6 +82,36 @@ services:
     depends_on:
       airflow-init:
         condition: service_completed_successfully
+
+  backend:
+    build:
+      context: .
+      dockerfile: app/backend/Dockerfile
+    restart: unless-stopped
+    environment:
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_NAME: real_estate
+      DB_USER: user
+      DB_PASSWORD: password
+    volumes:
+      - ./checkpoints:/app/checkpoints
+    ports:
+      - "8000:8000"
+    depends_on:
+      - postgres
+
+  frontend:
+    build:
+      context: .
+      dockerfile: app/frontend/Dockerfile
+    restart: unless-stopped
+    environment:
+      BACKEND_URL: http://backend:8000
+    ports:
+      - "8501:8501"
+    depends_on:
+      - backend
 
 volumes:
   postgres_data:

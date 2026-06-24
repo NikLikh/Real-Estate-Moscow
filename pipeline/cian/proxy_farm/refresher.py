@@ -90,6 +90,8 @@ async def _light_cycle(pool: HttpPool, cfg: dict):
     # чистим мёртвые слоты от бесплатных источников
     await _check_existing_slots(pool, "mono-")
     await _check_existing_slots(pool, "1click-")
+    await _check_existing_slots(pool, "cg-")
+    await _check_existing_slots(pool, "free-")
 
 
 async def _heavy_cycle(pool: HttpPool, cfg: dict):

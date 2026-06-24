@@ -1,0 +1,13 @@
+.venv
+.git
+__pycache__
+*.pyc
+.pytest_cache
+notebooks
+logs
+airflow/logs
+jars
+support_files
+pipeline/cian/extensions
+checkpoints
+.vscode

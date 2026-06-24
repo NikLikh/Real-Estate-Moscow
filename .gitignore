@@ -16,6 +16,7 @@ data
 .env.*
 pipeline/cian/extensions/*/
 !pipeline/cian/extensions/.gitkeep
+pipeline/ml/moscow_raions.geojson
 airflow/logs
 dbt/target
 dbt/dbt_packages
