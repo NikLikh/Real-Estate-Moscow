@@ -26,7 +26,7 @@ scrape -> raw.cian_observations -> dbt (stg/dds/marts) -> ml_train -> ml_score -
 
 - scrape - один прогон скрапера пишет наблюдения в raw.cian_observations
 - transform - dbt build пересобирает stg/dds/marts из raw
-- ml_train - переобучение модели на закрытых объявлениях (marts.ml_listings_wide)
+- ml_train - переобучение модели на закрытых объявлениях
 - ml_score - применение модели к активным, запись marts.hot_listings
 - app - backend читает marts и отдаёт данные frontend-у
 
@@ -63,23 +63,10 @@ docker compose exec airflow-scheduler airflow dags trigger ml_train
 docker compose exec airflow-scheduler airflow dags trigger ml_score
 ```
 
-Либо напрямую, минуя планировщик:
-
-```bash
-docker compose exec airflow-scheduler \
-  /opt/airflow/dbt-venv/bin/dbt build --project-dir /opt/dbt --profiles-dir /opt/dbt
-docker compose exec -e PYTHONPATH=/opt/airflow airflow-scheduler \
-  /opt/airflow/ml-venv/bin/python -m pipeline.ml.train
-docker compose exec -e PYTHONPATH=/opt/airflow airflow-scheduler \
-  /opt/airflow/ml-venv/bin/python -m pipeline.ml.score
-```
-
-На машине с малым лимитом RAM (WSL) dbt стоит гнать в один поток: добавить `--threads 1`, иначе тяжёлые dds-агрегации идут параллельно и упираются в память.
-
 Приложение после ml_score:
 
-- backend - http://localhost:8000 (витрины, hot-листинги, метаданные модели)
-- frontend - http://localhost:8501 (дашборд по рынку, страница горячих объявлений)
+- backend - http://localhost:8000
+- frontend - http://localhost:8501
 
 ## Слои данных
 
@@ -93,7 +80,7 @@ raw через python -m pipeline.core.apply (идемпотентно, CREATE I
   - ml_listings_wide - одна строка на объявление, фичи и таргет для ML
   - current_listings - активные объявления для дашборда
   - price_index_monthly - помесячная медиана цены за метр по сегментам
-  - hot_listings - результат скоринга (пишет ml_score, не dbt)
+  - hot_listings - результат скоринга
 
 ## ML-модель
 
@@ -106,8 +93,6 @@ raw через python -m pipeline.core.apply (идемпотентно, CREATE I
 - артефакты в checkpoints/: hot_model_latest.joblib, hot_model_<date>.joblib, hot_model_meta.json
 - ml_score применяет hot_model_latest к активным и пишет marts.hot_listings (cian_id, цена, price_per_m2, метро, hot_score)
 
-Цена за метр в фичах считается от первой наблюдённой цены (price_first), чтобы не утекала информация о траектории цены за всё время жизни объявления.
-
 ## Источники
 
 Kaggle:
@@ -117,7 +102,7 @@ Kaggle:
 - romanbaster/sale-and-rental-of-russian-real-estate-in-4-cities
 - ivan314sh/prices-of-moscow-apartments
 - hishamhaydar/moscow-2018-housing-prices
-- angultiaev/flat-sale-m24ml (162GB, через remotezip)
+- angultiaev/flat-sale-m24ml
 
 cian.ru - вторичка и новостройки Москвы и МО.
 
