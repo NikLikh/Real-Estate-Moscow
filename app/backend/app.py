@@ -14,7 +14,7 @@ app = FastAPI(title="real_estate")
 CHECKPOINTS = os.path.join(os.path.dirname(__file__), "..", "..", "checkpoints")
 EXPORT_PATH = os.path.join(CHECKPOINTS, "current_listings.xlsx")
 META_PATH = os.path.join(CHECKPOINTS, "hot_model_meta.json")
-PPM2_MIN, PPM2_MAX = 50000, 2000000
+PPM2_MIN, PPM2_MAX = 20000, 2000000
 
 
 @app.get("/health")
@@ -33,7 +33,7 @@ def model_meta():
 
 
 @app.get("/dashboard/price-index")
-def price_index(municipality=Query(None), is_new_building=Query(None)):
+def price_index(region=Query(None), municipality=Query(None), is_new_building=Query(None)):
     sql = (
         "select month, "
         "round(sum(median_ppm2 * n_points)::numeric / nullif(sum(n_points), 0))::bigint as median_ppm2, "
@@ -41,6 +41,9 @@ def price_index(municipality=Query(None), is_new_building=Query(None)):
         "from marts.price_index_monthly where month >= '2026-01-01'"
     )
     params = []
+    if region:
+        sql += " and region = %s"
+        params.append(region)
     if municipality:
         sql += " and municipality = %s"
         params.append(municipality)
@@ -52,9 +55,14 @@ def price_index(municipality=Query(None), is_new_building=Query(None)):
 
 
 @app.get("/dashboard/segmentation")
-def segmentation():
+def segmentation(region=Query(None)):
+    cond = "price_per_m2 between %s and %s"
+    params = [PPM2_MIN, PPM2_MAX]
+    if region:
+        cond += " and region = %s"
+        params.append(region)
     by_rooms = fetch_all(
-        """
+        f"""
         select
             case when is_studio then 'Студия'
                  when rooms is null then 'Не указано'
@@ -67,13 +75,13 @@ def segmentation():
             percentile_cont(0.95) within group (order by price_per_m2) as p95,
             count(*) as n
         from marts.current_listings
-        where price_per_m2 between %s and %s
+        where {cond}
         group by room_group having count(*) > 50
         """,
-        (PPM2_MIN, PPM2_MAX),
+        tuple(params),
     )
     new_vs_secondary = fetch_all(
-        """
+        f"""
         select
             is_new_building,
             percentile_cont(0.05) within group (order by price_per_m2) as p05,
@@ -83,56 +91,78 @@ def segmentation():
             percentile_cont(0.95) within group (order by price_per_m2) as p95,
             count(*) as n
         from marts.current_listings
-        where price_per_m2 between %s and %s
+        where {cond}
         group by is_new_building order by is_new_building
         """,
-        (PPM2_MIN, PPM2_MAX),
+        tuple(params),
     )
     return {"by_rooms": by_rooms, "new_vs_secondary": new_vs_secondary}
 
 
-@app.get("/dashboard/geo")
-def geo():
+@app.get("/dashboard/regions")
+def regions():
     return fetch_all(
         """
-        select municipality,
+        select region,
                percentile_cont(0.5) within group (order by price_per_m2) as median_ppm2,
-               count(*) as n_active, avg(lat) as lat, avg(lon) as lon
+               count(*) as n_active
         from marts.current_listings
-        where municipality is not null and lat is not null
+        where region is not null
           and price_per_m2 between %s and %s
-        group by municipality order by median_ppm2 desc
+        group by region order by median_ppm2 desc
         """,
         (PPM2_MIN, PPM2_MAX),
     )
+
+
+@app.get("/dashboard/geo")
+def geo(region=Query(None)):
+    sql = (
+        "select municipality, "
+        "percentile_cont(0.5) within group (order by price_per_m2) as median_ppm2, "
+        "count(*) as n_active, avg(lat) as lat, avg(lon) as lon "
+        "from marts.current_listings "
+        "where municipality is not null and lat is not null "
+        "and price_per_m2 between %s and %s"
+    )
+    params = [PPM2_MIN, PPM2_MAX]
+    if region:
+        sql += " and region = %s"
+        params.append(region)
+    sql += " group by municipality order by median_ppm2 desc"
+    return fetch_all(sql, tuple(params))
 
 
 @app.get("/dashboard/geo-points")
-def geo_points():
-    return fetch_all(
-        """
-        select lat, lon, price_per_m2
-        from marts.current_listings
-        where lat is not null and lon is not null
-          and price_per_m2 between %s and %s
-        order by random() limit 60000
-        """,
-        (PPM2_MIN, PPM2_MAX),
+def geo_points(region=Query(None)):
+    sql = (
+        "select lat, lon, price_per_m2 "
+        "from marts.current_listings "
+        "where lat is not null and lon is not null "
+        "and price_per_m2 between %s and %s"
     )
+    params = [PPM2_MIN, PPM2_MAX]
+    if region:
+        sql += " and region = %s"
+        params.append(region)
+    sql += " order by random() limit 60000"
+    return fetch_all(sql, tuple(params))
 
 
 @app.get("/dashboard/distribution")
-def distribution():
+def distribution(region=Query(None)):
+    inner = (
+        "select width_bucket(price_per_m2, 20000, 1220000, 24) as b "
+        "from marts.current_listings "
+        "where price_per_m2 between 20000 and 1220000"
+    )
+    params = []
+    if region:
+        inner += " and region = %s"
+        params.append(region)
     return fetch_all(
-        """
-        select b as bucket, (100000 + (b - 1) * 50000)::bigint as ppm2_from, count(*) as n
-        from (
-            select width_bucket(price_per_m2, 100000, 1200000, 22) as b
-            from marts.current_listings
-            where price_per_m2 between 100000 and 1200000
-        ) t
-        group by b order by b
-        """
+        f"select b as bucket, (20000 + (b - 1) * 50000)::bigint as ppm2_from, count(*) as n from ({inner}) t group by b order by b",
+        tuple(params),
     )
 
 

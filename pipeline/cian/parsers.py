@@ -94,6 +94,24 @@ def _parse_metro_json(geo: dict) -> list | None:
     return out or None
 
 
+def _parse_railways_json(geo: dict) -> list | None:
+    out = []
+    for rw in geo.get("railways") or []:
+        name = rw.get("name")
+        if name:
+            out.append([name, rw.get("time"), rw.get("travelType"), rw.get("distance")])
+    return out or None
+
+
+def _parse_highways_json(geo: dict) -> list | None:
+    out = []
+    for hw in geo.get("highways") or []:
+        name = hw.get("name")
+        if name:
+            out.append([name, hw.get("distance")])
+    return out or None
+
+
 def _parse_views(stats: dict | None) -> tuple[int | None, int | None]:
     if not stats:
         return None, None
@@ -141,7 +159,7 @@ def map_offer(od: dict) -> dict:
     total_area = o.get("totalArea")
     if isinstance(total_area, str):
         total_area = _parse_float(total_area)
-    price = terms.get("price")
+    price = terms.get("priceRur") or terms.get("price")
     price_per_m2 = int(price / total_area) if price and total_area else None
 
     is_studio = bool(o.get("isStudio")) or o.get("flatType") == "studio"
@@ -176,6 +194,7 @@ def map_offer(od: dict) -> dict:
         "price": price,
         "price_per_m2": price_per_m2,
         "price_type": terms.get("priceType"),
+        "currency": terms.get("currency"),
         "mortgage_allowed": terms.get("mortgageAllowed"),
         "deal_conditions": terms.get("saleType"),
         **addr,
@@ -220,7 +239,40 @@ def map_offer(od: dict) -> dict:
         "is_penthouse": o.get("isPenthouse"),
         "room_type": o.get("roomType"),
         "demolished_in_renovation": o.get("demolishedInMoscowProgramm"),
+        "railways": _parse_railways_json(geo),
+        "highways": _parse_highways_json(geo),
+        "is_emergency": building.get("isEmergency"),
+        "year_release": building.get("yearRelease"),
+        "has_playground": building.get("hasPlayground"),
+        "has_sportsground": building.get("hasSportsground"),
+        "house_material_type": building.get("houseMaterialType"),
+        "house_heat_supply_type": building.get("houseHeatSupplyType"),
+        "house_gas_supply_type": building.get("houseGasSupplyType"),
+        "house_overlap_type": building.get("houseOverlapType"),
+        "house_overhaul_fund_type": building.get("houseOverhaulFundType"),
+        "flat_count": building.get("flatCount"),
+        "entrances": building.get("entrances"),
+        "series_name": building.get("seriesName"),
+        "chute_count": building.get("chuteCount"),
+        "has_furniture": o.get("hasFurniture"),
+        "has_ramp": o.get("hasRamp"),
+        "all_rooms_area": o.get("allRoomsArea"),
+        "is_recidivist": o.get("isRecidivist"),
+        "is_duplicated_description": o.get("isDuplicatedDescription"),
+        "from_developer": o.get("fromDeveloper"),
+        "user_trust_level": agent.get("userTrustLevel"),
+        "is_agent": agent.get("isAgent"),
+        "is_builder": agent.get("isBuilder"),
+        "agency_name": agent.get("agencyName"),
     }
+
+
+def _price_history_from_changes(changes) -> list[dict]:
+    return [
+        {"price": e["priceData"]["price"], "date": e["changeTime"][:10]}
+        for e in (changes or [])
+        if isinstance(e, dict) and e.get("priceData") and e.get("changeTime")
+    ]
 
 
 def parse_offer_from_json(html: str) -> tuple[dict | None, list[dict]]:
@@ -232,12 +284,27 @@ def parse_offer_from_json(html: str) -> tuple[dict | None, list[dict]]:
     if not data.get("price"):
         return None, []
 
-    price_history = [
-        {"price": e["priceData"]["price"], "date": e["changeTime"][:10]}
-        for e in (od.get("priceChanges") or [])
-        if isinstance(e, dict) and e.get("priceData") and e.get("changeTime")
-    ]
-    return data, price_history
+    return data, _price_history_from_changes(od.get("priceChanges"))
+
+
+def map_offer_from_api(offer: dict) -> tuple[dict | None, list[dict]]:
+    od = {
+        "offer": offer,
+        "agent": offer.get("user") or {},
+        "stats": offer.get("statistic"),
+    }
+    data = map_offer(od)
+    if not data.get("price"):
+        return None, []
+
+    building = offer.get("building") or {}
+    user = offer.get("user") or {}
+    if data.get("demolished_in_renovation") is None:
+        data["demolished_in_renovation"] = building.get("demolishedInMoscowProgramm")
+    if data.get("seller_is_owner") is None:
+        data["seller_is_owner"] = user.get("accountType") == "homeowner"
+
+    return data, _price_history_from_changes(offer.get("priceChanges"))
 
 
 def parse_similar_urls_from_html(html: str) -> list[str]:

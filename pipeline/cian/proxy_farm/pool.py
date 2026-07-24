@@ -11,9 +11,12 @@ log = logging.getLogger("re")
 class HttpSlot:
     proxy: str | None
     label: str
+    source: str = ""
     budget: int = 9000
     reqs: int = 0
     waf: int = 0
+    neterr: int = 0
+    dead_cycles: int = 0
     cooldown_until: float = 0
     ip: str = ""
     _last_req: float = 0
@@ -28,8 +31,14 @@ class HttpPool:
         self._lock = asyncio.Lock()
         self._proxy_sems: dict[str, asyncio.Semaphore] = {}
         self._max_concurrent = max_concurrent_per_proxy
+        self.src_stats: dict[str, dict] = {}
         for s in slots:
             s.rate_limit = rate_limit
+
+    def _src(self, slot: HttpSlot) -> dict:
+        return self.src_stats.setdefault(
+            slot.source or "?", {"ok": 0, "net": 0, "waf": 0, "quarantined": 0}
+        )
 
     async def acquire(self) -> HttpSlot | None:
         """выдаём слот с учётом rate limit И concurrent per proxy"""
@@ -87,11 +96,44 @@ class HttpPool:
 
     def report_ok(self, slot: HttpSlot):
         slot.waf = 0
+        slot.neterr = 0
+        slot.dead_cycles = 0
+        self._src(slot)["ok"] += 1
 
     def report_waf(self, slot: HttpSlot, cooldown=30):
         slot.waf += 1
         slot.cooldown_until = time.monotonic() + cooldown
+        self._src(slot)["waf"] += 1
         log.debug(f"[HTTP] {slot.label} waf #{slot.waf}, cooling {cooldown}s")
+
+    def report_net_error(self, slot: HttpSlot, threshold=3, cooldown=20, quarantine_after=5):
+        slot.neterr += 1
+        self._src(slot)["net"] += 1
+        if slot.neterr >= threshold:
+            slot.neterr = 0
+            slot.dead_cycles += 1
+            if quarantine_after and slot.dead_cycles >= quarantine_after:
+                slot.cooldown_until = time.monotonic() + 86400
+                self._src(slot)["quarantined"] += 1
+                log.info(f"[HTTP] {slot.label} мёртв ({slot.dead_cycles} циклов без успеха), убран из ротации")
+            else:
+                slot.cooldown_until = time.monotonic() + cooldown
+                log.debug(f"[HTTP] {slot.label} {threshold} net errors подряд, cooling {cooldown}s")
+
+    def source_breakdown(self) -> list[tuple]:
+        now = time.monotonic()
+        total = {}
+        alive = {}
+        for s in self._slots:
+            k = s.source or "?"
+            total[k] = total.get(k, 0) + 1
+            if s.cooldown_until <= now and (not s.budget or s.reqs < s.budget):
+                alive[k] = alive.get(k, 0) + 1
+        rows = []
+        for k in sorted(set(list(total) + list(self.src_stats))):
+            st = self.src_stats.get(k, {"ok": 0, "net": 0, "waf": 0, "quarantined": 0})
+            rows.append((k, alive.get(k, 0), total.get(k, 0), st["ok"], st["net"], st["waf"], st["quarantined"]))
+        return rows
 
     def report_budget(self, slot: HttpSlot, cooldown=300):
         slot.cooldown_until = time.monotonic() + cooldown

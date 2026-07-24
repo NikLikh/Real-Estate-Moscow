@@ -39,7 +39,7 @@ def build_filters_from_config(cfg=None):
 
 
 _SMALL_ROOMS = {"studio", "1-room", "2-room"}
-_REGION_ORDER = {"mo": 0, "msk": 1}
+_REGION_ORDER = {"mo": 0, "msk": 1, "spb": 2, "lo": 3}
 
 
 def _priority_key(f):
@@ -63,7 +63,7 @@ def _price_label(lo, hi):
         if v is None:
             return ""
         if v >= 1_000_000:
-            return f"{v // 1_000_000}M"
+            return f"{v / 1_000_000:g}M"
         return f"{v // 1000}K"
 
     return f"{fmt(lo)}-{fmt(hi) or '+'}"
@@ -84,7 +84,7 @@ def _derive_filter(parent, new_lo, new_hi):
     }
 
 
-async def _http_check_count(pool, filt, cfg, max_retries=10):
+async def _http_check_count(pool, filt, cfg, sem, max_retries=10):
     from curl_cffi.requests import AsyncSession
     from pipeline.cian.proxy_farm.detector import headers as _headers, is_waf as _is_waf, is_captcha as _is_captcha
     from pipeline.cian.api import api_headers, build_json_query, parse_search
@@ -98,36 +98,37 @@ async def _http_check_count(pool, filt, cfg, max_retries=10):
             await asyncio.sleep(3)
             continue
 
-        try:
-            async with AsyncSession(
-                impersonate="chrome", proxy=slot.proxy, max_clients=5
-            ) as s:
-                resp = await s.post(cfg["api_listing_endpoint"], json=body, headers=h, timeout=15)
-        except Exception:
-            pool.report_waf(slot, 10)
-            continue
+        async with sem:
+            try:
+                async with AsyncSession(
+                    impersonate="chrome", proxy=slot.proxy, max_clients=5
+                ) as s:
+                    resp = await s.post(cfg["api_listing_endpoint"], json=body, headers=h, timeout=15)
+            except Exception:
+                pool.report_waf(slot, 10)
+                continue
 
-        if _is_waf(resp.text, resp.status_code):
-            pool.report_waf(slot, 30)
-            continue
+            if _is_waf(resp.text, resp.status_code):
+                pool.report_waf(slot, 30)
+                continue
 
-        if _is_captcha(resp.text, str(resp.url)):
-            pool.report_waf(slot, 60)
-            continue
+            if _is_captcha(resp.text, str(resp.url)):
+                pool.report_waf(slot, 60)
+                continue
 
-        pool.report_ok(slot)
-        try:
-            data = resp.json()["data"]
-        except Exception:
-            return None, []
-        count, rows = parse_search(data)
-        return count, [u for u, _, _ in rows]
+            pool.report_ok(slot)
+            try:
+                data = resp.json()["data"]
+            except Exception:
+                return None, []
+            count, rows = parse_search(data)
+            return count, [u for u, *_ in rows]
 
     return None, []
 
 
-async def _http_maybe_split(pool, filt, max_offers, min_split, cfg, early_urls=None):
-    count, page1_urls = await _http_check_count(pool, filt, cfg)
+async def _http_maybe_split(pool, filt, max_offers, min_split, cfg, sem, early_urls=None):
+    count, page1_urls = await _http_check_count(pool, filt, cfg, sem)
     if early_urls is not None and page1_urls:
         early_urls.extend(page1_urls)
     lo = filt["price_lo"] or 0
@@ -136,6 +137,7 @@ async def _http_maybe_split(pool, filt, max_offers, min_split, cfg, early_urls=N
     if count is None:
         # не знаем сколько, но листинг обойдёт до 54 страниц = 1512 карточек
         filt["offer_count"] = 54 * 28
+        filt["count_unknown"] = True
         log.info(f"  {filt['label']}: count unknown, ставим {filt['offer_count']} (max pages)")
         return [filt]
 
@@ -156,11 +158,11 @@ async def _http_maybe_split(pool, filt, max_offers, min_split, cfg, early_urls=N
     log.info(f"  {filt['label']}: {count} offers, дробим на {mid // 1_000_000}M")
 
     left = _derive_filter(filt, lo, mid)
-    right = _derive_filter(filt, mid, hi)
+    right = _derive_filter(filt, mid, filt["price_hi"])
 
     left_res, right_res = await asyncio.gather(
-        _http_maybe_split(pool, left, max_offers, min_split, cfg),
-        _http_maybe_split(pool, right, max_offers, min_split, cfg),
+        _http_maybe_split(pool, left, max_offers, min_split, cfg, sem),
+        _http_maybe_split(pool, right, max_offers, min_split, cfg, sem),
     )
     return left_res + right_res
 
@@ -183,17 +185,30 @@ async def http_plan_filters(pool, cfg=None, url_queue=None, seen=None):
 
     log.info(f"plan: {len(raw)} raw filters, processing via curl_cffi...")
 
+    sem = asyncio.Semaphore(cfg.get("planner_concurrency", 64))
     result = []
     early_urls = []
     lock = asyncio.Lock()
 
     async def worker(filt):
-        sub = await _http_maybe_split(pool, filt, max_offers, min_split, cfg, early_urls=early_urls)
+        sub = await _http_maybe_split(pool, filt, max_offers, min_split, cfg, sem, early_urls=early_urls)
         async with lock:
             result.extend(sub)
 
     tasks = [worker(filt) for filt in raw]
     await asyncio.gather(*tasks)
+
+    unknowns = [f for f in result if f.get("count_unknown")]
+    if unknowns:
+        log.info(f"plan: повторная проверка {len(unknowns)} фильтров без count")
+        for f in unknowns:
+            f.pop("count_unknown", None)
+        retried = await asyncio.gather(*[
+            _http_maybe_split(pool, f, max_offers, min_split, cfg, sem) for f in unknowns
+        ])
+        result = [f for f in result if f not in unknowns]
+        for sub in retried:
+            result.extend(sub)
 
     # ранние URL-ы в очередь, чтобы offer workers не простаивали
     if url_queue and early_urls:

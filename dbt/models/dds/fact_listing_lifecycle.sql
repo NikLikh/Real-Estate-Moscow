@@ -12,7 +12,7 @@ with latest as (
         photos_count, views_total, views_today,
         seller_is_owner, status, cian_user_id, is_penthouse, room_type
     from {{ ref('stg_cian_observations') }}
-    order by cian_id, (region is not null) desc, scraped_at desc
+    order by cian_id, (region is not null) desc, (municipality is not null) desc, scraped_at desc
 ),
 agg as (
     select

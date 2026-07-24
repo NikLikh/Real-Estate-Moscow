@@ -1,5 +1,6 @@
 select
     cian_id,
+    region,
     municipality,
     rooms,
     flat_type,
@@ -37,4 +38,4 @@ select
 from {{ ref('ml_listings_wide') }}
 where event_closed = 0
   and total_area between 10 and 400
-  and price between 1000000 and 2000000000
+  and price between 300000 and 2000000000

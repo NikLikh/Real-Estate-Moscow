@@ -1,0 +1,164 @@
+cian_base: "https://www.cian.ru/cat.php?deal_type=sale&engine_version=2&offer_type=flat"
+
+auto_discover: true
+endpoint_preflight: true
+endpoint_preflight_retries: 2
+runtime_endpoint_types: [proxy]
+experimental_endpoint_types: [vpn_extension, web_proxy]
+
+endpoint_policies:
+  default:
+    network_cooldown: 3
+    captcha_cooldown: 5
+    quarantine_cooldown: 300
+    max_warming_failures: 3
+    max_quarantine_failures: 5
+
+# fallback если auto_discover: false
+endpoints:
+  - name: direct
+    proxy: null
+    rate_limit: 2.0
+
+regions:
+  msk:
+    id: 1
+    rooms:
+      studio: "room9=1"
+      1-room: "room1=1"
+      2-room: "room2=1"
+      3-room: "room3=1"
+      4-room: "room4=1"
+      5+room: "room5=1&room6=1"
+    prices:
+      - [3_000_000, 6_000_000]
+      - [6_000_000, 10_000_000]
+      - [10_000_000, 15_000_000]
+      - [15_000_000, 20_000_000]
+      - [20_000_000, 30_000_000]
+      - [30_000_000, 50_000_000]
+      - [50_000_000, 100_000_000]
+      - [100_000_000, null]
+    object_types:
+      new: "object_type%5B0%5D=1"
+      resale: "object_type%5B0%5D=2"
+
+  mo:
+    id: 4593
+    rooms:
+      studio: "room9=1"
+      1-room: "room1=1"
+      2-room: "room2=1"
+      3-room: "room3=1"
+      4+room: "room4=1&room5=1&room6=1"
+    prices:
+      - [3_000_000, 6_000_000]
+      - [6_000_000, 10_000_000]
+      - [10_000_000, 15_000_000]
+      - [15_000_000, 25_000_000]
+      - [25_000_000, 50_000_000]
+      - [50_000_000, null]
+    object_types:
+      new: "object_type%5B0%5D=1"
+      resale: "object_type%5B0%5D=2"
+
+  spb:
+    id: 2
+    rooms:
+      studio: "room9=1"
+      1-room: "room1=1"
+      2-room: "room2=1"
+      3-room: "room3=1"
+      4+room: "room4=1&room5=1&room6=1"
+    prices:
+      - [2_000_000, 5_000_000]
+      - [5_000_000, 8_000_000]
+      - [8_000_000, 12_000_000]
+      - [12_000_000, 18_000_000]
+      - [18_000_000, 30_000_000]
+      - [30_000_000, 60_000_000]
+      - [60_000_000, null]
+    object_types:
+      new: "object_type%5B0%5D=1"
+      resale: "object_type%5B0%5D=2"
+
+  lo:
+    id: 4588
+    rooms:
+      studio: "room9=1"
+      1-room: "room1=1"
+      2-room: "room2=1"
+      3-room: "room3=1"
+      4+room: "room4=1&room5=1&room6=1"
+    prices:
+      - [1_500_000, 3_000_000]
+      - [3_000_000, 5_000_000]
+      - [5_000_000, 7_000_000]
+      - [7_000_000, 10_000_000]
+      - [10_000_000, 15_000_000]
+      - [15_000_000, null]
+    object_types:
+      new: "object_type%5B0%5D=1"
+      resale: "object_type%5B0%5D=2"
+
+allowed_region_ids: [1, 4593, 2, 4588]
+
+skip_url_parts:
+  - "/sale/room/"
+  - "/sale/share/"
+
+skip_phrases:
+  - "продаётся комната"
+  - "продается комната"
+  - "продаётся доля"
+  - "продается доля"
+  - "комната в "
+  - "доля в "
+
+max_concurrent: 15
+planner_workers: 3
+retry_workers: 1
+
+waf_endpoint_cooldown: 3
+cb_window: 30
+cb_threshold: 12
+cb_cooldown: 30
+
+ip_budget: 20000
+ip_budget_cooldown: 120
+
+max_pages: 54
+cards_per_page: 28
+url_queue_max: 300
+max_offers_per_filter: 1000
+min_price_split: 100_000
+
+max_restarts: 50
+restart_cooldown: 600
+max_worker_crashes: 20
+memory_threshold_mb: 12000
+
+vpn_extensions:
+  - extension: browsec
+    path: extensions/browsec
+    servers: [nl, uk, de, lt, lv, sg, us]
+    rate_limit: 2.0
+
+api_full_extract: true
+
+http_listing_workers: 30
+http_listing_concurrency: 80
+api_listing_endpoint: "https://api.cian.ru/search-offers/v1/search-offers-mobile-site/"
+api_zhk_endpoint: "https://api.cian.ru/search-offers/v1/search-offers-mobile-site/"
+http_offer_workers: 60
+http_offer_batch: 3
+http_max_concurrent_per_proxy: 2
+http_per_slot_concurrency: 50
+http_rate_per_slot: 5.0
+http_timeout: 15
+http_retry_max: 3
+free_proxy_discovery: false
+proxy_refresh_interval: 1800
+browsec_refresh_interval: 3600
+oneclickvpn_uuid: ""
+cian_validation: true

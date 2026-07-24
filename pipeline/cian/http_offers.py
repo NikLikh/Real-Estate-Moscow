@@ -6,12 +6,60 @@ import time
 from curl_cffi.requests import AsyncSession
 
 from pipeline.cian.api import api_headers, build_jk_query, build_json_query, parse_search
-from pipeline.cian.parsers import extract_cian_id, extract_region_id, parse_offer_from_json, parse_similar_urls_from_html
+from pipeline.cian.parsers import extract_cian_id, extract_region_id, map_offer_from_api, parse_offer_from_json, parse_similar_urls_from_html
 from pipeline.cian.runtime import should_stop
 from pipeline.cian.proxy_farm.detector import is_waf, is_captcha, is_vpn_block, headers
 from pipeline.cian.proxy_farm.refresher import run_refresher
 
 log = logging.getLogger("re")
+
+
+async def _emit_api_offer(offer_obj, cid, href, row_queue, stats, worker):
+    try:
+        data, price_history = map_offer_from_api(offer_obj)
+    except Exception:
+        stats["api_errors"] = stats.get("api_errors", 0) + 1
+        return False
+    if not data:
+        return False
+    data["url"] = href.split("?")[0]
+    data["cian_id"] = cid
+    data["_html_price_history"] = price_history
+    await row_queue.put(([data], {"worker": worker}))
+    stats["api_parsed"] = stats.get("api_parsed", 0) + 1
+    stats["parsed"] = stats.get("parsed", 0) + 1
+    return True
+
+
+async def _register_card(cid, href, card_price, offer_obj, seen, listing_cache,
+                         url_queue, row_queue, stats, cfg, worker):
+    api_extract = bool(cfg.get("api_full_extract")) and row_queue is not None
+    info = listing_cache.get(cid) if listing_cache else None
+    if info is not None:
+        stats["listing_cached"] = stats.get("listing_cached", 0) + 1
+        seen.add(cid)
+        if card_price and info.get("price") and card_price != info["price"] and not info.get("_repriced"):
+            info["_repriced"] = True
+            info["price"] = card_price
+            info["_touched"] = True
+            info["_card_price"] = card_price
+            stats["price_changes"] = stats.get("price_changes", 0) + 1
+            if api_extract and offer_obj is not None and await _emit_api_offer(offer_obj, cid, href, row_queue, stats, worker):
+                return "repriced"
+            await url_queue.put(href)
+            return "repriced"
+        info["_touched"] = True
+        if card_price:
+            info["_card_price"] = card_price
+        return "known"
+    if cid in seen:
+        stats["listing_cached"] = stats.get("listing_cached", 0) + 1
+        return "dup"
+    seen.add(cid)
+    if api_extract and offer_obj is not None and await _emit_api_offer(offer_obj, cid, href, row_queue, stats, worker):
+        return "new"
+    await url_queue.put(href)
+    return "new"
 
 
 async def fetch_offer(session, url, slot, pool, stats, cfg):
@@ -29,6 +77,7 @@ async def fetch_offer(session, url, slot, pool, stats, cfg):
         pool.release_concurrent(slot)
         log.debug(f"[HTTP] {slot.label} network error: {e}")
         stats["net_errors"] = stats.get("net_errors", 0) + 1
+        pool.report_net_error(slot, cfg.get("net_error_threshold", 3), cfg.get("net_error_cooldown", 20), cfg.get("net_error_quarantine", 5))
         return None
     pool.release_concurrent(slot)
     fetch_ms = (time.monotonic() - t_fetch) * 1000
@@ -244,6 +293,7 @@ async def run_http_workers(
 
 
 async def _search_rows(session, body, slot, pool, stats, cfg, endpoint=None):
+    await pool.acquire_concurrent(slot)
     try:
         resp = await session.post(
             endpoint or cfg["api_listing_endpoint"],
@@ -252,8 +302,11 @@ async def _search_rows(session, body, slot, pool, stats, cfg, endpoint=None):
             timeout=cfg.get("http_timeout", 15),
         )
     except Exception:
+        pool.release_concurrent(slot)
         stats["net_errors"] = stats.get("net_errors", 0) + 1
+        pool.report_net_error(slot, cfg.get("net_error_threshold", 3), cfg.get("net_error_cooldown", 20), cfg.get("net_error_quarantine", 5))
         return None
+    pool.release_concurrent(slot)
 
     if is_waf(resp.text, resp.status_code):
         pool.report_waf(slot, cfg.get("http_waf_cooldown", 30))
@@ -283,10 +336,10 @@ async def _search_rows(session, body, slot, pool, stats, cfg, endpoint=None):
 async def http_listing_worker(
     name, filters, url_queue, seen, completed, pool, stats, cfg,
     listing_cache=None, shared_sessions=None, sem=None, zhk_ids=None,
+    row_queue=None,
 ):
     sessions = shared_sessions if shared_sessions is not None else {}
     sem = sem or asyncio.Semaphore(cfg.get("http_listing_concurrency", 100))
-
     async def get_session(proxy):
         if proxy not in sessions:
             sessions[proxy] = AsyncSession(
@@ -322,25 +375,14 @@ async def http_listing_worker(
             pages = await asyncio.gather(*[fetch_page(filt, pg) for pg in range(1, pages_for_filter + 1)])
 
             for result in pages:
-                for href, card_price, jk in result:
+                for href, card_price, jk, offer_obj in result:
                     if jk and zhk_ids is not None:
                         zhk_ids.add(jk)
                     cid = extract_cian_id(href)
                     if not cid:
                         continue
-                    if cid in seen:
-                        if listing_cache and cid in listing_cache:
-                            listing_cache[cid]["_touched"] = True
-                        stats["listing_cached"] = stats.get("listing_cached", 0) + 1
-                        continue
-                    seen.add(cid)
-                    if listing_cache and card_price and cid in listing_cache:
-                        old_price = listing_cache[cid].get("price")
-                        if old_price and old_price == card_price:
-                            listing_cache[cid]["_touched"] = True
-                            stats["touched"] = stats.get("touched", 0) + 1
-                            continue
-                    await url_queue.put(href)
+                    await _register_card(cid, href, card_price, offer_obj, seen, listing_cache,
+                                         url_queue, row_queue, stats, cfg, name)
 
             completed.append(label)
             stats["filters_done"] = stats.get("filters_done", 0) + 1
@@ -352,6 +394,7 @@ async def http_listing_worker(
 
 async def run_http_listings(
     n, filters, url_queue, seen, completed, pool, stats, cfg, listing_cache=None, zhk_ids=None,
+    row_queue=None,
 ):
     shared_sessions = {}
     default_conc = pool.slot_count * cfg.get("http_max_concurrent_per_proxy", 2)
@@ -366,6 +409,7 @@ async def run_http_listings(
                 shared_sessions=shared_sessions,
                 sem=sem,
                 zhk_ids=zhk_ids,
+                row_queue=row_queue,
             )
         )
         for i in range(n)
@@ -378,7 +422,7 @@ async def run_http_listings(
             await s.close()
 
 
-async def run_http_zhk(jk_ids, url_queue, seen, pool, stats, cfg):
+async def run_http_zhk(jk_ids, url_queue, seen, pool, stats, cfg, row_queue=None, listing_cache=None):
     if not jk_ids:
         return
     stats["zhk_total"] = len(jk_ids)
@@ -422,13 +466,14 @@ async def run_http_zhk(jk_ids, url_queue, seen, pool, stats, cfg):
                     page += 1
                     continue
                 empty = 0
-                for href, _price, _jk in rows:
+                for href, card_price, _jk, offer_obj in rows:
                     cid = extract_cian_id(href)
-                    if not cid or cid in seen:
+                    if not cid:
                         continue
-                    seen.add(cid)
-                    await url_queue.put(href)
-                    stats["zhk_new"] = stats.get("zhk_new", 0) + 1
+                    outcome = await _register_card(cid, href, card_price, offer_obj, seen, listing_cache,
+                                                   url_queue, row_queue, stats, cfg, "zhk")
+                    if outcome == "new":
+                        stats["zhk_new"] = stats.get("zhk_new", 0) + 1
                 page += 1
             if page > max_pages:
                 stats["zhk_capped"] = stats.get("zhk_capped", 0) + 1

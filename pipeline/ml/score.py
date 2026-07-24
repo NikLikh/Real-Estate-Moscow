@@ -6,9 +6,10 @@ from sqlalchemy import text
 
 from pipeline.ml.db import make_engine
 from pipeline.ml.export import build_export
+from pipeline.ml.features import INPUT_COLUMNS
 
-SCORE_QUERY = """
-select * from marts.ml_listings_wide
+SCORE_QUERY = f"""
+select {', '.join(INPUT_COLUMNS)} from marts.ml_listings_wide
 where event_closed = 0 and total_area > 0 and price > 0
 """
 HOT_COLUMNS = ["cian_id", "municipality", "rooms", "total_area", "price",

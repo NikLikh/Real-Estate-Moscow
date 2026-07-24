@@ -4,6 +4,7 @@ import os
 import random
 import sys
 import time
+from datetime import datetime, timezone
 
 from config.settings import load_scraper_config
 from pipeline.core.raw_repo import insert_observations, get_current_state
@@ -238,7 +239,7 @@ async def print_stats_periodically(
         waf = stats.get("waf_blocks", 0)
         net = stats.get("net_errors", 0)
         similar = stats.get("similar_found", 0)
-        touched = stats.get("touched", 0)
+        touched = stats.get("price_changes", 0)
         lst_cards = stats.get("listing_cards_total", 0)
         lst_skip_url = stats.get("listing_skip_url", 0)
         lst_skip_phrase = stats.get("listing_skip_phrase", 0)
@@ -271,7 +272,7 @@ async def print_stats_periodically(
 
             lines.append(f"  P1 LISTING  {elapsed_min:.1f}m  ETA {p1_eta}  {fl_done}/{fl_total} filters  {cards_rate:.0f} cards/min")
             lines.append(f"  [{_bar(pct, bar_w)}] {pct:.0f}%")
-            lines.append(f"  new: {qsize:,}  cached: {lst_cached:,}  skip: {lst_skip_url + lst_skip_phrase}  touch: {touched}")
+            lines.append(f"  new: {qsize:,}  cached: {lst_cached:,}  skip: {lst_skip_url + lst_skip_phrase}  repriced: {touched}")
             lines.append(f"  slots: {alive}/{total_slots} ({slot_pct}%)  |  waf: {waf}  cap: {cap}  net: {net}  status: {bad_st}  |  {mem_mb:.0f}MB")
 
         elif phase == "zhk":
@@ -309,7 +310,7 @@ async def print_stats_periodically(
             lines.append(f"  {phase_label}  {elapsed_min:.1f}m  ETA {eta}  {_fmt_count(parsed)}/{_fmt_count(p2_total)}")
             lines.append(f"  [{_bar(pct, bar_w)}] {pct:.1f}%")
             lines.append(f"  saved: {stats.get('saved', 0):,}  |  {parse_rate:.0f}/min")
-            lines.append(f"  q: {qsize:,}  |  similar: +{similar}  |  touched: {touched}")
+            lines.append(f"  q: {qsize:,}  |  similar: +{similar}  |  repriced: {touched}")
             lines.append(f"  slots: {alive}/{total_slots} ({slot_pct}%)  |  {fetch_rate:.0f} req/min  |  {mem_mb:.0f}MB")
 
             # ошибки одной строкой, без нулей
@@ -425,22 +426,28 @@ async def _run_session(all_filters, seen, stats, cfg, t0, listing_cache=None):
                 cfg.get("http_listing_workers", 25),
                 filters, url_queue, seen, completed,
                 http_pool, stats, cfg, listing_cache=listing_cache, zhk_ids=zhk_ids,
+                row_queue=row_queue,
             )
-
-            touched_rows = [
-                {"cian_id": cid, "price": info.get("price")}
-                for cid, info in listing_cache.items()
-                if info.get("_touched")
-            ]
-            if touched_rows:
-                tc = insert_observations(touched_rows, SCRAPE_RUN_ID)
-                log.info(f"[OBS] {tc} lightweight observations from listing cards (no full fetch)")
 
             if zhk_ids:
                 stats["phase"] = "zhk"
                 log.info(f"[PHASE 1b] ЖК-drill: {len(zhk_ids)} ЖК")
-                await run_http_zhk(zhk_ids, url_queue, seen, http_pool, stats, cfg)
+                await run_http_zhk(zhk_ids, url_queue, seen, http_pool, stats, cfg,
+                                   row_queue=row_queue, listing_cache=listing_cache)
                 log.info(f"[PHASE 1b] +{stats.get('zhk_new', 0)} квартир, capped={stats.get('zhk_capped', 0)}")
+
+            today = datetime.now(timezone.utc).date()
+            touched_rows = []
+            for cid, info in listing_cache.items():
+                if not info.get("_touched") or info.get("_repriced"):
+                    continue
+                last_seen = info.get("last_seen_at")
+                if last_seen and last_seen.astimezone(timezone.utc).date() >= today:
+                    continue
+                touched_rows.append({"cian_id": cid, "price": info.get("_card_price") or info.get("price")})
+            if touched_rows:
+                tc = insert_observations(touched_rows, SCRAPE_RUN_ID)
+                log.info(f"[OBS] {tc} presence observations from listing cards")
 
             stats["p2_total"] = url_queue.qsize()
             stats["phase"] = "offers"
@@ -529,6 +536,12 @@ async def _run_session(all_filters, seen, stats, cfg, t0, listing_cache=None):
         if writer_task and not writer_task.done():
             writer_task.cancel()
 
+    if http_pool:
+        log.info(f"{'-' * 56}")
+        log.info("  источники прокси (alive/total  ok  net  waf  quar):")
+        for name, alive_c, total_c, ok, net, waf, quar in http_pool.source_breakdown():
+            log.info(f"    {name:<11} {alive_c:>3}/{total_c:<3}  ok={ok:<6} net={net:<6} waf={waf:<5} quar={quar}")
+
     return completed
 
 
@@ -597,8 +610,9 @@ async def main():
     log.info(f"  cian total:  {total_planned:>8,}  (from filter counts)")
     log.info(f"  queued:      {p2_total:>8,}  (actual URLs for P2)")
     log.info(f"  parsed:      {parsed:>8,}  ({p2_pct}% of queued)")
+    log.info(f"  from api:    {stats.get('api_parsed', 0):>8,}  (extracted from search json)")
     log.info(f"  saved:       {saved:>8,}")
-    log.info(f"  touched:     {stats.get('touched', 0):>8,}")
+    log.info(f"  repriced:    {stats.get('price_changes', 0):>8,}")
     log.info(f"  similar:     {stats.get('similar_found', 0):>8,}")
     log.info(f"{'-' * w}")
 

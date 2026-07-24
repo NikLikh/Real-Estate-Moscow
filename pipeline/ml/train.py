@@ -14,10 +14,10 @@ from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import TargetEncoder
 
 from pipeline.ml.db import make_engine
-from pipeline.ml.features import CATEGORICAL, NUMERIC, FeatureBuilder, make_target
+from pipeline.ml.features import CATEGORICAL, INPUT_COLUMNS, NUMERIC, FeatureBuilder, make_target
 
-TRAIN_QUERY = """
-select * from marts.ml_listings_wide
+TRAIN_QUERY = f"""
+select {', '.join(INPUT_COLUMNS)} from marts.ml_listings_wide
 where event_closed = 1 and days_on_market >= 0
   and total_area > 0 and price > 0
 """

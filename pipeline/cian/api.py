@@ -1,7 +1,7 @@
 import re
 
 _OFFER_URL = "https://www.cian.ru/sale/flat/{}/"
-_STATUS = {"new": 1, "resale": 2}
+_STATUS = {"new": 2, "resale": 1}
 
 
 def api_headers(base):
@@ -52,11 +52,12 @@ def parse_search(data):
         cid = o.get("cianId") or o.get("id")
         if not cid:
             continue
-        price = (o.get("bargainTerms") or {}).get("price")
+        terms = o.get("bargainTerms") or {}
+        price = terms.get("priceRur") or terms.get("price")
         jk_raw = (o.get("newbuilding") or {}).get("id")
         try:
             jk = int(jk_raw) if jk_raw is not None else None
         except (TypeError, ValueError):
             jk = None
-        rows.append((_OFFER_URL.format(cid), int(price) if price else None, jk))
+        rows.append((_OFFER_URL.format(cid), int(price) if price else None, jk, o))
     return data.get("offerCount"), rows

@@ -8,6 +8,12 @@ import pandas as pd
 from sklearn.base import BaseEstimator, TransformerMixin
 
 CENTER_LAT, CENTER_LON = 55.7520, 37.6175
+REGION_CENTERS = {
+    "Москва": (55.7520, 37.6175),
+    "Московская область": (55.7520, 37.6175),
+    "Санкт-Петербург": (59.9386, 30.3141),
+    "Ленинградская область": (59.9386, 30.3141),
+}
 GEOJSON_PATH = os.path.join(os.path.dirname(__file__), "moscow_raions.geojson")
 HOT_DAYS = 14
 
@@ -26,6 +32,15 @@ CATEGORICAL = [
     "region", "flat_type", "renovation", "window_view", "building_type", "parking",
     "seller_type", "seller_user_type", "room_type", "deal_conditions", "municipality", "district",
 ]
+
+INPUT_COLUMNS = [
+    "cian_id", "days_on_market", "price", "price_first", "total_area", "living_area",
+    "kitchen_area", "rooms", "is_studio", "floor", "total_floors", "ceiling_height",
+    "lat", "lon", "n_metro", "nearest_metro", "nearest_metro_time", "nearest_metro_walk",
+    "mortgage_allowed", "is_apartments", "is_new_building", "phone_protected",
+    "completion_date", "passenger_lifts", "cargo_lifts", "bathrooms", "balcony",
+    "year_built", "is_penthouse", "seller_is_owner", "demolished_in_renovation",
+] + CATEGORICAL
 
 BOOL_COLS = ["is_apartments", "is_new_building", "phone_protected", "is_studio",
              "mortgage_allowed", "nearest_metro_walk", "demolished_in_renovation",
@@ -78,9 +93,11 @@ class FeatureBuilder(BaseEstimator, TransformerMixin):
         r = 6371.0
         lat = np.radians(_num(f["lat"]))
         lon = np.radians(_num(f["lon"]))
-        dlat = lat - np.radians(CENTER_LAT)
-        dlon = lon - np.radians(CENTER_LON)
-        a = np.sin(dlat / 2) ** 2 + np.cos(lat) * np.cos(np.radians(CENTER_LAT)) * np.sin(dlon / 2) ** 2
+        center_lat = np.radians(f["region"].map({k: v[0] for k, v in REGION_CENTERS.items()}).fillna(CENTER_LAT))
+        center_lon = np.radians(f["region"].map({k: v[1] for k, v in REGION_CENTERS.items()}).fillna(CENTER_LON))
+        dlat = lat - center_lat
+        dlon = lon - center_lon
+        a = np.sin(dlat / 2) ** 2 + np.cos(lat) * np.cos(center_lat) * np.sin(dlon / 2) ** 2
         return 2 * r * np.arcsin(np.sqrt(a))
 
     @staticmethod
