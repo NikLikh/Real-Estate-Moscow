@@ -1,7 +1,9 @@
 import asyncio
 import json
 import logging
+import os
 import signal
+from datetime import date
 from pathlib import Path
 
 from config.settings import PROJECT_ROOT
@@ -11,7 +13,6 @@ log = logging.getLogger("re")
 _CHECKPOINT_DIR = PROJECT_ROOT / "checkpoints"
 _CHECKPOINT_DIR.mkdir(exist_ok=True)
 
-# shutdown (ctrl+c) и restart (память/ошибки), воркеры проверяют should_stop()
 _shutdown = asyncio.Event()
 _restart = asyncio.Event()
 
@@ -48,12 +49,23 @@ def install_shutdown_handler():
     signal.signal(signal.SIGTERM, _handler)
 
 
+_PERSISTENT = {"cian_zhk"}
+
+
+def _day() -> str:
+    run_id = os.getenv("SCRAPE_RUN_ID") or ""
+    if len(run_id) >= 8 and run_id[:8].isdigit():
+        return f"{run_id[:4]}-{run_id[4:6]}-{run_id[6:8]}"
+    return date.today().isoformat()
+
+
 def save_checkpoint(name: str, state: dict):
-    # пишем через tmp чтобы не потерять файл при обрыве
     path = _CHECKPOINT_DIR / f".checkpoint_{name}.json"
     tmp = path.with_suffix(".tmp")
+    payload = dict(state)
+    payload["_day"] = _day()
     with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(state, f, ensure_ascii=False)
+        json.dump(payload, f, ensure_ascii=False)
     tmp.replace(path)
 
 
@@ -62,7 +74,13 @@ def load_checkpoint(name: str) -> dict | None:
     if not path.exists():
         return None
     with open(path, encoding="utf-8") as f:
-        return json.load(f)
+        state = json.load(f)
+    day = state.pop("_day", None)
+    if name not in _PERSISTENT and day != _day():
+        log.info(f"checkpoint {name}: от другого дня, сбрасываю")
+        path.unlink(missing_ok=True)
+        return None
+    return state
 
 
 def clear_checkpoint(name: str):

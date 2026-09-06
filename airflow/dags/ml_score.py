@@ -7,6 +7,7 @@ with DAG(
     schedule="0 21 * * *",
     start_date=pendulum.datetime(2026, 1, 1, tz="UTC"),
     catchup=False,
+    max_active_runs=1,
 ) as dag:
     BashOperator(
         task_id="score",

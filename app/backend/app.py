@@ -74,7 +74,7 @@ def segmentation(region=Query(None)):
             percentile_cont(0.75) within group (order by price_per_m2) as q3,
             percentile_cont(0.95) within group (order by price_per_m2) as p95,
             count(*) as n
-        from marts.current_listings
+        from marts.current_units
         where {cond}
         group by room_group having count(*) > 50
         """,
@@ -90,7 +90,7 @@ def segmentation(region=Query(None)):
             percentile_cont(0.75) within group (order by price_per_m2) as q3,
             percentile_cont(0.95) within group (order by price_per_m2) as p95,
             count(*) as n
-        from marts.current_listings
+        from marts.current_units
         where {cond}
         group by is_new_building order by is_new_building
         """,
@@ -106,7 +106,7 @@ def regions():
         select region,
                percentile_cont(0.5) within group (order by price_per_m2) as median_ppm2,
                count(*) as n_active
-        from marts.current_listings
+        from marts.current_units
         where region is not null
           and price_per_m2 between %s and %s
         group by region order by median_ppm2 desc
@@ -121,7 +121,7 @@ def geo(region=Query(None)):
         "select municipality, "
         "percentile_cont(0.5) within group (order by price_per_m2) as median_ppm2, "
         "count(*) as n_active, avg(lat) as lat, avg(lon) as lon "
-        "from marts.current_listings "
+        "from marts.current_units "
         "where municipality is not null and lat is not null "
         "and price_per_m2 between %s and %s"
     )
@@ -137,7 +137,7 @@ def geo(region=Query(None)):
 def geo_points(region=Query(None)):
     sql = (
         "select lat, lon, price_per_m2 "
-        "from marts.current_listings "
+        "from marts.current_units "
         "where lat is not null and lon is not null "
         "and price_per_m2 between %s and %s"
     )
@@ -153,7 +153,7 @@ def geo_points(region=Query(None)):
 def distribution(region=Query(None)):
     inner = (
         "select width_bucket(price_per_m2, 20000, 1220000, 24) as b "
-        "from marts.current_listings "
+        "from marts.current_units "
         "where price_per_m2 between 20000 and 1220000"
     )
     params = []

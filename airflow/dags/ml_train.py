@@ -4,9 +4,10 @@ from airflow.operators.bash import BashOperator
 
 with DAG(
     dag_id="ml_train",
-    schedule="0 21 * * 0",
+    schedule="0 23 * * 0",
     start_date=pendulum.datetime(2026, 1, 1, tz="UTC"),
     catchup=False,
+    max_active_runs=1,
 ) as dag:
     BashOperator(
         task_id="train",

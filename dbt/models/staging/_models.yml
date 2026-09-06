@@ -9,3 +9,15 @@ models:
       - name: price
         tests:
           - not_null
+
+  - name: stg_cian_rent
+    columns:
+      - name: cian_id
+        tests:
+          - not_null
+      - name: price
+        tests:
+          - not_null
+      - name: deal_type
+        tests:
+          - not_null

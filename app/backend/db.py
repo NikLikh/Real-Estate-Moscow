@@ -18,7 +18,8 @@ def get_engine():
     if _engine is None:
         c = DB_CONFIG
         _engine = create_engine(
-            f"postgresql+psycopg2://{c['user']}:{c['password']}@{c['host']}:{c['port']}/{c['dbname']}"
+            f"postgresql+psycopg2://{c['user']}:{c['password']}@{c['host']}:{c['port']}/{c['dbname']}",
+            pool_pre_ping=True,
         )
     return _engine
 

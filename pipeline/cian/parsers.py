@@ -1,5 +1,6 @@
 import json
 import re
+from datetime import date
 
 
 def extract_cian_id(url: str) -> int | None:
@@ -44,6 +45,14 @@ _MICRO_TYPES = {"mikroraion", "microdistrict", "newobject", "settlement", "posel
 _JK_RE = re.compile(r"жилой комплекс|жилой кв|квартал|микрорайон|мкр", re.IGNORECASE)
 
 
+def deal_type(offer: dict) -> str:
+    if offer.get("category") == "dailyFlatRent":
+        return "rent_day"
+    if offer.get("dealType") == "rent":
+        return "rent_long"
+    return "sale"
+
+
 def normalize_district(name: str | None) -> str | None:
     if not name:
         return name
@@ -54,7 +63,7 @@ def normalize_district(name: str | None) -> str | None:
 
 def _parse_geo_address(items: list) -> dict:
     res = {"region": None, "municipality": None, "district": None,
-           "microdistrict": None, "street": None, "house": None}
+           "microdistrict": None, "street": None, "house": None, "house_id": None}
     loc_seen = 0
     for it in items or []:
         name = it.get("shortName") or it.get("fullName") or it.get("name")
@@ -80,6 +89,7 @@ def _parse_geo_address(items: list) -> dict:
             res["street"] = name
         elif t == "house":
             res["house"] = name
+            res["house_id"] = it.get("id")
         elif t in _MICRO_TYPES and res["microdistrict"] is None:
             res["microdistrict"] = name
     return res
@@ -190,13 +200,24 @@ def map_offer(od: dict) -> dict:
     parking = building.get("parking")
     parking_type = parking.get("type") if isinstance(parking, dict) and parking else None
 
+    utilities = terms.get("utilitiesTerms") or {}
+
     return {
+        "deal_type": deal_type(o),
         "price": price,
         "price_per_m2": price_per_m2,
         "price_type": terms.get("priceType"),
         "currency": terms.get("currency"),
         "mortgage_allowed": terms.get("mortgageAllowed"),
         "deal_conditions": terms.get("saleType"),
+        "deposit": terms.get("deposit"),
+        "agent_fee": terms.get("agentFee"),
+        "client_fee": terms.get("clientFee"),
+        "prepay_months": terms.get("prepayMonths"),
+        "lease_term_type": terms.get("leaseTermType"),
+        "payment_period": terms.get("paymentPeriod"),
+        "utilities_included": utilities.get("includedInPrice"),
+        "utilities_price": utilities.get("price"),
         **addr,
         "lat": coords.get("lat"),
         "lon": coords.get("lng"),
@@ -221,10 +242,12 @@ def map_offer(od: dict) -> dict:
         "passenger_lifts": building.get("passengerLiftsCount") or o.get("passengerLiftsCount"),
         "cargo_lifts": building.get("cargoLiftsCount") or o.get("cargoLiftsCount"),
         "is_new_building": bool(nb.get("id") or nb.get("isFromDeveloper") or nb.get("isFromBuilder") or jk.get("name")),
+        "nb_house_id": (nb.get("house") or {}).get("id"),
         "developer": nb.get("name") or None,
         "residential_complex": jk.get("name") or None,
         "completion_date": _extract_completion_date(o),
         "description": o.get("description"),
+        "descr_minhash": o.get("descriptionMinhash"),
         "publication_date": o.get("creationDate"),
         "edit_date": o.get("editDate"),
         "seller_type": agent.get("accountType"),
@@ -257,14 +280,83 @@ def map_offer(od: dict) -> dict:
         "has_furniture": o.get("hasFurniture"),
         "has_ramp": o.get("hasRamp"),
         "all_rooms_area": o.get("allRoomsArea"),
-        "is_recidivist": o.get("isRecidivist"),
-        "is_duplicated_description": o.get("isDuplicatedDescription"),
         "from_developer": o.get("fromDeveloper"),
         "user_trust_level": agent.get("userTrustLevel"),
         "is_agent": agent.get("isAgent"),
         "is_builder": agent.get("isBuilder"),
         "agency_name": agent.get("agencyName"),
+        "beds_count": o.get("bedsCount"),
+        "pets_allowed": o.get("petsAllowed"),
+        "children_allowed": o.get("childrenAllowed"),
+        "has_fridge": o.get("hasFridge"),
+        "has_washer": o.get("hasWasher"),
+        "has_dishwasher": o.get("hasDishwasher"),
+        "has_conditioner": o.get("hasConditioner"),
+        "has_tv": o.get("hasTv"),
+        "has_internet": o.get("hasInternet"),
     }
+
+
+_RANGE = {
+    "total_area": (5, 3000, float),
+    "living_area": (2, 3000, float),
+    "kitchen_area": (1, 500, float),
+    "ceiling_height": (2.0, 10.0, float),
+    "lat": (41.0, 82.0, float),
+    "lon": (19.0, 191.0, float),
+    "total_floors": (1, 130, int),
+    "floor": (-5, 130, int),
+    "rooms": (0, 30, int),
+    "photos_count": (0, 500, int),
+    "flat_count": (1, 30000, int),
+    "entrances": (1, 300, int),
+    "chute_count": (0, 300, int),
+    "passenger_lifts": (0, 60, int),
+    "cargo_lifts": (0, 60, int),
+    "beds_count": (1, 100, int),
+    "views_total": (0, 10_000_000, int),
+    "views_today": (0, 1_000_000, int),
+}
+
+_NUM_RE = re.compile(r"-?\d+(?:[.,]\d+)?")
+
+
+def _num(v):
+    if v is None or isinstance(v, bool):
+        return None
+    if isinstance(v, (int, float)):
+        return v
+    if isinstance(v, str):
+        m = _NUM_RE.search(v.replace(" ", "").replace(" ", ""))
+        if m:
+            return float(m.group().replace(",", "."))
+    return None
+
+
+def sanitize(data: dict) -> dict:
+    for field, (lo, hi, cast) in _RANGE.items():
+        v = _num(data.get(field))
+        data[field] = cast(v) if v is not None and lo <= v <= hi else None
+
+    year_cap = date.today().year + 8
+    for field in ("year_built", "year_release"):
+        v = _num(data.get(field))
+        data[field] = int(v) if v is not None and 1700 <= v <= year_cap else None
+
+    if data["lat"] is None or data["lon"] is None:
+        data["lat"] = data["lon"] = None
+
+    area = data["total_area"]
+    for field in ("living_area", "kitchen_area"):
+        if area and data[field] and data[field] > area:
+            data[field] = None
+
+    if data["floor"] and data["total_floors"] and data["floor"] > data["total_floors"]:
+        data["total_floors"] = None
+
+    price = data.get("price")
+    data["price_per_m2"] = int(price / area) if price and area else None
+    return data
 
 
 def _price_history_from_changes(changes) -> list[dict]:
@@ -284,7 +376,7 @@ def parse_offer_from_json(html: str) -> tuple[dict | None, list[dict]]:
     if not data.get("price"):
         return None, []
 
-    return data, _price_history_from_changes(od.get("priceChanges"))
+    return sanitize(data), _price_history_from_changes(od.get("priceChanges"))
 
 
 def map_offer_from_api(offer: dict) -> tuple[dict | None, list[dict]]:
@@ -304,7 +396,7 @@ def map_offer_from_api(offer: dict) -> tuple[dict | None, list[dict]]:
     if data.get("seller_is_owner") is None:
         data["seller_is_owner"] = user.get("accountType") == "homeowner"
 
-    return data, _price_history_from_changes(offer.get("priceChanges"))
+    return sanitize(data), _price_history_from_changes(offer.get("priceChanges"))
 
 
 def parse_similar_urls_from_html(html: str) -> list[str]:

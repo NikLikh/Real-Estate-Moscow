@@ -1,5 +1,3 @@
-# proxy_farm/sources/free_lists.py
-# 20+ бесплатных proxy-листов (GitHub raw, API)
 import asyncio
 import logging
 import random

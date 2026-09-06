@@ -6,3 +6,4 @@ sources:
     tables:
       - name: cian_observations
       - name: kaggle_flats
+      - name: scrape_runs

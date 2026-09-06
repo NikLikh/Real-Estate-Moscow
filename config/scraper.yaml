@@ -14,7 +14,6 @@ endpoint_policies:
     max_warming_failures: 3
     max_quarantine_failures: 5
 
-# fallback если auto_discover: false
 endpoints:
   - name: direct
     proxy: null
@@ -1171,7 +1170,7 @@ skip_phrases:
 
 max_concurrent: 15
 planner_workers: 3
-planner_concurrency: 64
+planner_concurrency: 200
 retry_workers: 1
 
 waf_endpoint_cooldown: 3
@@ -1179,19 +1178,34 @@ cb_window: 30
 cb_threshold: 12
 cb_cooldown: 30
 
-ip_budget: 20000
-ip_budget_cooldown: 120
+ip_budget: 160
+waf_retire_limit: 10
 
-max_pages: 54
+max_pages: 200
 cards_per_page: 28
-url_queue_max: 300
-max_offers_per_filter: 1000
-min_price_split: 100_000
+pool_starved_backoff: 2
+max_offers_per_filter: 400
+min_price_split: 25_000
+plan_from_db: true
+plan_target_bucket: 300
 
-max_restarts: 50
-restart_cooldown: 600
+deals:
+  sale: {}
+  rent_long:
+    max_offers: 500
+    min_split: 500
+    price_cap: 400_000
+  rent_day:
+    max_offers: 500
+    min_split: 100
+    price_cap: 40_000
+
+max_restarts: 2
+restart_cooldown: 120
 max_worker_crashes: 20
-memory_threshold_mb: 12000
+memory_threshold_mb: 3000
+min_alive_slots: 5
+pool_low_grace: 600
 
 vpn_extensions:
   - extension: browsec
@@ -1201,23 +1215,48 @@ vpn_extensions:
 
 api_full_extract: true
 
-http_listing_workers: 30
-http_listing_concurrency: 80
+http_listing_workers: 400
+http_listing_concurrency: 500
 api_listing_endpoint: "https://api.cian.ru/search-offers/v1/search-offers-mobile-site/"
 api_zhk_endpoint: "https://api.cian.ru/search-offers/v1/search-offers-mobile-site/"
 http_offer_workers: 60
+p2_max_urls: 3000
 http_offer_batch: 3
-http_max_concurrent_per_proxy: 2
+http_max_concurrent_per_proxy: 8
 http_per_slot_concurrency: 50
-http_rate_per_slot: 3.0
-http_timeout: 15
+http_rate_per_slot: 1.9
+http_timeout: 22
 http_retry_max: 3
-http_waf_cooldown: 45
-http_captcha_cooldown: 180
+http_waf_cooldown: 6
+http_captcha_cooldown: 5
+captcha_streak_limit: 3
+captcha_streak_cooldown: 0
+slot_burst: 3
+slot_window: 0
+proxy_connect_timeout: 12
+proxy_list_cap: 4000
+proxy_validate_timeout: 20
+validation_concurrency: 80
+proxy_target_slots: 120
+proxy_max_slots: 1000
+proxy_list_refresh: 1800
+proxy_recheck_after: 3600
+use_direct_slot: true
+listing_page_tries: 6
+listing_page_batch: 3
+listing_empty_tries: 1
+slot_wait_limit: 120
+zhk_max_per_run: 1000
+zhk_max_pages: 40
+zhk_phase_timeout: 420
+net_error_threshold: 6
+net_error_cooldown: 20
 free_proxy_discovery: false
-proxy_refresh_interval: 1800
-browsec_refresh_interval: 3600
+pool_warmup_wait: 600
+browsec_refresh_interval: 1200
+vpn_discovery_timeout: 90
 oneclickvpn_uuid: ""
 enable_oneclickvpn: false
-net_error_quarantine: 5
+net_error_quarantine: 3
+net_error_quarantine_cooldown: 300
 cian_validation: true

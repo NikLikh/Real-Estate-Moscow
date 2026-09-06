@@ -16,6 +16,7 @@ DB_CONFIG = {
     "dbname": os.getenv("DB_NAME", "real_estate"),
     "user": os.getenv("DB_USER", ""),
     "password": os.getenv("DB_PASSWORD", ""),
+    "connect_timeout": int(os.getenv("DB_CONNECT_TIMEOUT", "15")),
 }
 
 JDBC_URL = (
@@ -41,7 +42,6 @@ logging.basicConfig(
 log = logging.getLogger("re")
 
 
-# кэшируем чтобы не парсить yaml на каждый вызов
 _scraper_cfg = None
 
 
@@ -85,6 +85,8 @@ def _apply_scraper_env_overrides(cfg):
 
 def load_scraper_config(path=None):
     global _scraper_cfg
+    if path is None:
+        path = os.getenv("SCRAPER_CONFIG")
     if _scraper_cfg is not None and path is None:
         return _scraper_cfg
 

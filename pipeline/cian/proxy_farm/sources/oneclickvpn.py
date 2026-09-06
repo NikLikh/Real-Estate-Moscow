@@ -1,6 +1,3 @@
-# proxy_farm/sources/oneclickvpn.py
-# 1clickVPN API, бесплатные HTTPS CONNECT прокси
-# reverse-engineered из CRX расширения (fcfhplploccackoneaefokcmbjfbkenj)
 import logging
 import uuid as uuid_mod
 
@@ -14,7 +11,6 @@ _API = "https://1clickvpn.net/api/v1/servers/"
 
 
 async def discover(cfg) -> list[tuple[str, str, str]]:
-    # uuid хранится в конфиге, генерим при первом запуске
     client_uuid = cfg.get("oneclickvpn_uuid") or str(uuid_mod.uuid4())
     if not cfg.get("oneclickvpn_uuid"):
         cfg["oneclickvpn_uuid"] = client_uuid
@@ -31,7 +27,6 @@ async def discover(cfg) -> list[tuple[str, str, str]]:
         log.warning("[HTTP] 1clickvpn: unexpected response format")
         return []
 
-    # формируем прокси из серверов с credentials
     candidates = []
     for srv in servers:
         creds = srv.get("credentials", {})
@@ -46,7 +41,7 @@ async def discover(cfg) -> list[tuple[str, str, str]]:
             if not host:
                 continue
             proxy_url = f"https://{user}:{pwd}@{host}:{port}"
-            label = f"1click-{cc}"
+            label = f"1click-{cc}-{host}:{port}"
             candidates.append((label, proxy_url))
 
     if not candidates:
@@ -54,7 +49,6 @@ async def discover(cfg) -> list[tuple[str, str, str]]:
 
     log.info(f"[HTTP] 1clickvpn: {len(candidates)} candidates, validating S1+S2...")
 
-    # S1+S2 валидация, только прокси прошедшие cian попадают в пул
     result = await validate_batch_s1s2(candidates, concurrency=5, timeout=10)
     log.info(f"[HTTP] 1clickvpn: {len(result)}/{len(candidates)} passed S1+S2")
     return result

@@ -24,3 +24,9 @@ dbt/logs
 
 dbt/.user.yml
 docs/
+commerce/
+
+re-remote/
+pipeline/ml/hole_test.py
+pipeline/ml/survival_test.py
+*.bak*

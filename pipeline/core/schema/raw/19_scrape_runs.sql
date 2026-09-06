@@ -1,0 +1,21 @@
+CREATE TABLE IF NOT EXISTS raw.scrape_runs (
+    run_id       BIGINT PRIMARY KEY,
+    finished_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    minutes      REAL,
+    plan_offers  BIGINT,
+    plan_filters INTEGER,
+    cards        BIGINT,
+    presence     BIGINT,
+    parsed       BIGINT,
+    saved        BIGINT,
+    repriced     BIGINT,
+    empty_pages  BIGINT,
+    incomplete   INTEGER,
+    pages_lost   INTEGER,
+    captchas     BIGINT,
+    net_errors   BIGINT,
+    waf_blocks   BIGINT,
+    restarts     INTEGER,
+    pool_slots   INTEGER,
+    pool_alive   INTEGER
+);

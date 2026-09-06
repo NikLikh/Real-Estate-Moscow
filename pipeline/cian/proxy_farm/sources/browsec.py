@@ -1,9 +1,7 @@
-# proxy_farm/sources/browsec.py
-# Browsec серверы из PAC данных через headed browser
 import asyncio
 import logging
 
-from pipeline.cian.proxy_farm.validator import check_connectivity
+from pipeline.cian.proxy_farm.validator import check_cian_api, check_connectivity
 
 log = logging.getLogger("re")
 
@@ -44,7 +42,6 @@ async def discover(cfg) -> list[tuple[str, str, str]]:
             log.warning("[HTTP] browsec: no PAC data")
             return []
 
-        # собираем серверы из всех стран
         all_servers = []
         for country, servers in pac_data["countries"].items():
             for raw in servers:
@@ -55,14 +52,19 @@ async def discover(cfg) -> list[tuple[str, str, str]]:
             f"[HTTP] browsec: {len(all_servers)} servers from {len(pac_data['countries'])} countries"
         )
 
-        sem = asyncio.Semaphore(10)
+        sem = asyncio.Semaphore((cfg or {}).get("validation_concurrency", 30))
+
+        api_check = cfg.get("cian_validation", True)
 
         async def check(country, addr):
             proxy = f"https://{addr}"
             async with sem:
                 ip = await check_connectivity(proxy=proxy, timeout=8)
-                if ip:
-                    result.append((f"vpn-{country}", proxy, ip))
+                if not ip:
+                    return
+                if api_check and not await check_cian_api(proxy=proxy):
+                    return
+                result.append((f"vpn-{country}-{addr}", proxy, ip))
 
         await asyncio.gather(*(check(c, a) for c, a in all_servers))
         log.info(f"[HTTP] browsec: {len(result)}/{len(all_servers)} servers working")

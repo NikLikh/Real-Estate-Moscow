@@ -89,7 +89,6 @@ def _create_spark():
 
 
 def _align_columns(df):
-    # приводим к единой схеме, недостающие колонки заполняем NULL
     for col_name, col_type in SCHEMA.items():
         if col_name not in df.columns:
             df = df.withColumn(col_name, lit(None).cast(col_type))
@@ -111,7 +110,6 @@ def _write_to_pg(df, label):
 
 
 def _transform_mrdaniilak(df):
-    # нестандартная нумерация: 81 = Москва, 3 = МО (подтверждено координатами)
     return _align_columns(
         df.filter(col("region").isin(81, 3))
         .withColumn(
@@ -205,7 +203,6 @@ def _transform_ivan314sh(df):
 
 
 def _transform_mrdaniilak_2021(df):
-    # стандартные коды ФИАС: 77 = Москва, 50 = МО
     return _align_columns(
         df.filter(col("id_region").isin(77, 50))
         .withColumn(
@@ -286,8 +283,6 @@ def _transform_romanbaster(df):
 
 
 def _transform_hishamhaydar(df):
-    # у этого xlsx дублируются имена колонок, spark молча их схлопывает, поэтому
-    # переименовываем с префиксом-индексом и берем нужные по позиции
     old_cols = df.columns
     unique_names = [f"c{i}_{c}" for i, c in enumerate(old_cols)]
     df = df.toDF(*unique_names)
@@ -373,7 +368,6 @@ DATASETS = {
 
 
 def _load_xlsx_via_pandas(path, config):
-    """xlsx через pandas -> psycopg2 (Spark жрет слишком много памяти на xlsx)"""
     import pandas as pd
 
     df = pd.read_excel(path, sheet_name=config["xlsx_sheet"])

@@ -9,8 +9,10 @@ from pipeline.ml.export import build_export
 from pipeline.ml.features import INPUT_COLUMNS
 
 SCORE_QUERY = f"""
-select {', '.join(INPUT_COLUMNS)} from marts.ml_listings_wide
+select distinct on (unit_sk) {', '.join(INPUT_COLUMNS)} from marts.ml_listings_wide
 where event_closed = 0 and total_area > 0 and price > 0
+  and region = 'Москва'
+order by unit_sk, last_seen desc, cian_id desc
 """
 HOT_COLUMNS = ["cian_id", "municipality", "rooms", "total_area", "price",
                "price_per_m2", "nearest_metro", "hot_score"]

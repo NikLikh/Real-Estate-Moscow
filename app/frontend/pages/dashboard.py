@@ -78,7 +78,7 @@ else:
             opacity=0.7,
             hover_name="region",
             hover_data={"geo_name": False, "median_ppm2": ":,.0f", "n_active": True},
-            labels={"median_ppm2": "Медиана за м2, руб", "n_active": "Активных"},
+            labels={"median_ppm2": "Медиана за м2, руб", "n_active": "Квартир в продаже"},
         )
         fig.update_layout(margin=dict(l=0, r=0, t=0, b=0), height=560)
         st.plotly_chart(fig, use_container_width=True)
@@ -94,7 +94,7 @@ else:
 
 st.subheader("A. Динамика медианной цены за м2, руб")
 st.caption(
-    "Survivorship bias: история цен только по объявлениям, активным сейчас. Период: с 01.01.2026."
+    "Survivorship bias: история цен только по квартирам, активным сейчас. Период: с 01.01.2026."
 )
 idx = pd.DataFrame(get_json("/dashboard/price-index", params))
 if not idx.empty:
@@ -174,6 +174,9 @@ if not geo.empty:
     geo_sorted = geo.dropna(subset=["median_ppm2"]).sort_values(
         "median_ppm2", ascending=False
     )
+    if not region:
+        geo_sorted = geo_sorted.head(40)
+        st.caption("Топ-40 муниципалитетов по стране; выберите регион для полного среза")
     fig = px.bar(geo_sorted, x="municipality", y="median_ppm2", height=700)
     fig.update_layout(
         xaxis_title="Муниципалитет", yaxis_title="Медианная цена за м2, руб"
@@ -184,6 +187,6 @@ dist = pd.DataFrame(get_json("/dashboard/distribution", base_params))
 if not dist.empty:
     fig = px.bar(dist, x="ppm2_from", y="n")
     fig.update_layout(
-        xaxis_title="Цена за м2, руб", yaxis_title="Количество объявлений"
+        xaxis_title="Цена за м2, руб", yaxis_title="Количество квартир"
     )
     st.plotly_chart(fig, use_container_width=True)

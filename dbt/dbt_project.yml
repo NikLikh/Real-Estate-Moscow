@@ -11,6 +11,16 @@ test-paths: ["tests"]
 target-path: "target"
 clean-targets: ["target", "dbt_packages"]
 
+vars:
+  census_window_days: 30
+  census_floor: 0.6
+  closure_missed_days: 5
+  outlier_low: 10
+  outlier_high: 25
+  outlier_min_cell: 150
+  max_flat_area: 3000
+  unit_price_tolerance: 0.01
+
 models:
   re_warehouse:
     staging:
@@ -19,6 +29,8 @@ models:
     dds:
       +schema: dds
       +materialized: table
+      +post-hook: "analyze {{ this }}"
     marts:
       +schema: marts
       +materialized: table
+      +post-hook: "analyze {{ this }}"

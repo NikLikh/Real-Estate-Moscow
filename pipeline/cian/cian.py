@@ -7,10 +7,11 @@ import time
 from datetime import datetime, timezone
 
 from config.settings import load_scraper_config
-from pipeline.core.raw_repo import insert_observations, get_current_state
+from pipeline.core.raw_repo import get_current_state, insert_observations, insert_run_stats
 from pipeline.cian.http_offers import run_http_listings, run_http_workers, run_http_zhk
 from pipeline.cian.parsers import extract_cian_id
-from pipeline.cian.proxy_farm import build_proxy_pool
+from pipeline.cian.proxy_farm import build_proxy_pool, wait_for_pool
+from pipeline.cian.proxy_farm.refresher import run_refresher
 from pipeline.cian.planner import build_filters_from_config, http_plan_filters
 from pipeline.cian.runtime import (
     clear_checkpoint,
@@ -71,9 +72,14 @@ async def flush_rows(row_queue, stats, batch_size=50, flush_interval=5.0):
         if all_rows:
             t_db = time.monotonic()
             loop = asyncio.get_event_loop()
-            n = await loop.run_in_executor(None, insert_observations, all_rows, SCRAPE_RUN_ID)
+            try:
+                n = await loop.run_in_executor(None, insert_observations, all_rows, SCRAPE_RUN_ID)
+            except Exception as e:
+                n = 0
+                log.error(f"[DB] flush потерян ({len(all_rows)} строк): {e}")
             db_dt = time.monotonic() - t_db
             stats["saved"] = stats.get("saved", 0) + n
+            stats["db_dropped"] = stats.get("db_dropped", 0) + (len(all_rows) - n)
             log.debug(f"[DB] flush {len(all_rows)} rows -> obs={n} ({db_dt:.1f}s)")
         buffer = []
         last_flush = time.monotonic()
@@ -97,6 +103,49 @@ async def flush_rows(row_queue, stats, batch_size=50, flush_interval=5.0):
 
         if len(buffer) >= batch_size:
             await _flush()
+
+
+async def write_presence(listing_cache):
+    today = datetime.now(timezone.utc).date()
+    rows = []
+    for cid, info in listing_cache.items():
+        if not info.get("_touched") or info.get("_repriced") or info.get("_presence_written"):
+            continue
+        last_seen = info.get("last_seen_at")
+        if last_seen and last_seen.astimezone(timezone.utc).date() >= today:
+            continue
+        price = info.get("_card_price") or info.get("price")
+        if price is None:
+            continue
+        info["_presence_written"] = True
+        rows.append({"cian_id": cid, "price": price, "deal_type": info.get("_deal")})
+
+    if not rows:
+        return 0
+
+    loop = asyncio.get_event_loop()
+    written = 0
+    for i in range(0, len(rows), 20000):
+        written += await loop.run_in_executor(
+            None, insert_observations, rows[i:i + 20000], SCRAPE_RUN_ID
+        )
+    return written
+
+
+async def pool_watchdog(pool, min_alive, grace):
+    need = max(2, grace // 30)
+    samples = []
+    while not should_stop():
+        await asyncio.sleep(30)
+        samples.append(pool.alive)
+        if len(samples) > need:
+            samples.pop(0)
+        if len(samples) < need:
+            continue
+        if sum(samples) == 0:
+            log.warning(f"[POOL] {grace}s без единого живого слота, подача не справляется")
+            request_restart("подача прокси остановилась")
+            break
 
 
 async def memory_watchdog(threshold_mb):
@@ -164,7 +213,6 @@ def _bar(pct, width=30):
 
 
 def _fmt_count(n):
-    """1234 -> 1.2K, 12345 -> 12.3K, 123456 -> 123K"""
     if n < 1000:
         return str(n)
     if n < 100000:
@@ -212,7 +260,6 @@ async def print_stats_periodically(
         total_planned = stats.get("total_planned", 0)
         mem_mb = _get_mem_mb()
 
-        # скользящее окно 60 секунд
         cutoff = now - 60
         q_history.append((now, qsize))
         parsed_history.append((now, parsed))
@@ -265,15 +312,16 @@ async def print_stats_periodically(
             pct = fl_done / fl_total * 100
             bar_w = max(10, tw - 32)
 
-            # ETA по скорости завершения фильтров
             fl_remaining = fl_total - fl_done
             fl_rate = fl_done / elapsed_min if elapsed_min > 0.1 else 0
             p1_eta = f"{fl_remaining / fl_rate:.0f}m" if fl_rate > 0 else "?"
 
             lines.append(f"  P1 LISTING  {elapsed_min:.1f}m  ETA {p1_eta}  {fl_done}/{fl_total} filters  {cards_rate:.0f} cards/min")
             lines.append(f"  [{_bar(pct, bar_w)}] {pct:.0f}%")
-            lines.append(f"  new: {qsize:,}  cached: {lst_cached:,}  skip: {lst_skip_url + lst_skip_phrase}  repriced: {touched}")
+            lines.append(f"  new: {qsize:,}  cached: {lst_cached:,}  skip: {lst_skip_url + lst_skip_phrase}  repriced: {touched}  incomplete: {stats.get('filters_incomplete', 0)}")
+            pool_dbg = http_pool.debug_state() if http_pool else ""
             lines.append(f"  slots: {alive}/{total_slots} ({slot_pct}%)  |  waf: {waf}  cap: {cap}  net: {net}  status: {bad_st}  |  {mem_mb:.0f}MB")
+            lines.append(f"  pool: {pool_dbg}  |  empty: {stats.get('empty_pages', 0)}  |  q_listing: {stats.get('listing_inflight', 0)}")
 
         elif phase == "zhk":
             zhk_done = stats.get("zhk_done", 0)
@@ -298,7 +346,6 @@ async def print_stats_periodically(
             lines.append(f"  errors: {'  '.join(err_parts) if err_parts else 'none'}")
 
         else:
-            # phase 2 / retry -- прогресс от реального размера очереди, а не от cian planned
             p2_total = stats.get("p2_total", 0) or total_planned
             pct = parsed / p2_total * 100 if p2_total else 0
             bar_w = max(10, tw - 32)
@@ -313,7 +360,6 @@ async def print_stats_periodically(
             lines.append(f"  q: {qsize:,}  |  similar: +{similar}  |  repriced: {touched}")
             lines.append(f"  slots: {alive}/{total_slots} ({slot_pct}%)  |  {fetch_rate:.0f} req/min  |  {mem_mb:.0f}MB")
 
-            # ошибки одной строкой, без нулей
             err_parts = []
             if net: err_parts.append(f"net={net:,}")
             if waf: err_parts.append(f"waf={waf}")
@@ -337,12 +383,10 @@ async def print_stats_periodically(
         lines.insert(0, sep)
         lines.append(sep)
 
-        # очищаем предыдущий вывод, рисуем новый
         if prev_lines > 0:
             sys.stderr.write(f"\033[{prev_lines}A")
         for line in lines:
             sys.stderr.write(f"\033[K{line}\n")
-        # затираем лишние строки если раньше было больше
         if prev_lines > len(lines):
             for _ in range(prev_lines - len(lines)):
                 sys.stderr.write("\033[K\n")
@@ -370,8 +414,12 @@ async def _run_session(all_filters, seen, stats, cfg, t0, listing_cache=None):
 
     http_pool = await build_proxy_pool(cfg)
     n_http = cfg.get("http_offer_workers", 40)
-    if http_pool.alive <= 0:
-        log.error("[HTTP] no alive slots in pool, aborting session")
+    min_alive = cfg.get("min_alive_slots", 5)
+    supply_task = asyncio.create_task(run_refresher(http_pool, cfg))
+    if not await wait_for_pool(http_pool, min_alive, cfg.get("pool_warmup_wait", 300)):
+        supply_task.cancel()
+        log.error(f"[HTTP] pool {http_pool.alive} slots < {min_alive}, aborting session")
+        request_restart(f"пул {http_pool.alive} слотов на старте")
         return completed
     log.info(f"[HTTP] pool ready: {http_pool.alive} slots, {n_http} workers")
 
@@ -397,7 +445,9 @@ async def _run_session(all_filters, seen, stats, cfg, t0, listing_cache=None):
     checkpoint_task = None
     writer_task = None
     watchdog_task = None
+    pool_task = None
     stats_task = None
+    refresher_task = supply_task
     try:
         filters = []
         if remaining:
@@ -405,12 +455,20 @@ async def _run_session(all_filters, seen, stats, cfg, t0, listing_cache=None):
                 http_pool, cfg, url_queue=url_queue, seen=seen
             )
             stats["total_planned"] = total_offers
+            stats["plan_size"] = len(filters)
             filters = [f for f in filters if f["label"] not in done_labels]
             stats["filters_total"] = len(filters)
             log.info(f"after plan: {len(filters)} filters to crawl")
 
         writer_task = asyncio.create_task(flush_rows(row_queue, stats))
         watchdog_task = asyncio.create_task(memory_watchdog(mem_threshold))
+        pool_task = asyncio.create_task(
+            pool_watchdog(
+                http_pool,
+                cfg.get("min_alive_slots", 5),
+                cfg.get("pool_low_grace", 300),
+            )
+        )
         stats_task = asyncio.create_task(
             print_stats_periodically(stats, t0, url_queue=url_queue, http_pool=http_pool)
         )
@@ -419,6 +477,21 @@ async def _run_session(all_filters, seen, stats, cfg, t0, listing_cache=None):
         )
 
         zhk_ids = set()
+        saved_zhk = (load_checkpoint("cian_zhk") or {}).get("ids") or []
+        limit = cfg.get("zhk_max_per_run", 800)
+        if saved_zhk and not stats.get("zhk_run") and not should_stop():
+            stats["zhk_run"] = True
+            stats["phase"] = "zhk"
+            drill_ids = random.sample(saved_zhk, limit) if limit and len(saved_zhk) > limit else list(saved_zhk)
+            log.info(f"[PHASE 0] ЖК-drill: {len(drill_ids)} из {len(saved_zhk)} ЖК")
+            await run_http_zhk(drill_ids, url_queue, seen, http_pool, stats, cfg,
+                               row_queue=row_queue, listing_cache=listing_cache)
+            log.info(f"[PHASE 0] +{stats.get('zhk_new', 0)} квартир, capped={stats.get('zhk_capped', 0)}")
+            tc = await write_presence(listing_cache)
+            if tc:
+                stats["presence"] = stats.get("presence", 0) + tc
+                log.info(f"[OBS] {tc} presence observations from ЖК-drill")
+
         if filters:
             stats["phase"] = "listing"
             log.info(f"[PHASE 1] listing discovery, {len(filters)} filters")
@@ -429,31 +502,27 @@ async def _run_session(all_filters, seen, stats, cfg, t0, listing_cache=None):
                 row_queue=row_queue,
             )
 
-            if zhk_ids:
-                stats["phase"] = "zhk"
-                log.info(f"[PHASE 1b] ЖК-drill: {len(zhk_ids)} ЖК")
-                await run_http_zhk(zhk_ids, url_queue, seen, http_pool, stats, cfg,
-                                   row_queue=row_queue, listing_cache=listing_cache)
-                log.info(f"[PHASE 1b] +{stats.get('zhk_new', 0)} квартир, capped={stats.get('zhk_capped', 0)}")
-
-            today = datetime.now(timezone.utc).date()
-            touched_rows = []
-            for cid, info in listing_cache.items():
-                if not info.get("_touched") or info.get("_repriced"):
-                    continue
-                last_seen = info.get("last_seen_at")
-                if last_seen and last_seen.astimezone(timezone.utc).date() >= today:
-                    continue
-                touched_rows.append({"cian_id": cid, "price": info.get("_card_price") or info.get("price")})
-            if touched_rows:
-                tc = insert_observations(touched_rows, SCRAPE_RUN_ID)
+            tc = await write_presence(listing_cache)
+            if tc:
+                stats["presence"] = stats.get("presence", 0) + tc
                 log.info(f"[OBS] {tc} presence observations from listing cards")
 
+            if zhk_ids:
+                save_checkpoint("cian_zhk", {"ids": sorted(zhk_ids | set(saved_zhk))})
+                log.info(f"[ЖК] в чекпоинте {len(zhk_ids | set(saved_zhk))} ЖК")
+
+        deferred = []
+        p2_cap = cfg.get("p2_max_urls", 0)
+        if p2_cap:
+            while url_queue.qsize() > p2_cap:
+                deferred.append(url_queue.get_nowait())
+            stats["p2_deferred"] = len(deferred)
+
+        if url_queue.qsize() and not should_stop():
             stats["p2_total"] = url_queue.qsize()
             stats["phase"] = "offers"
             log.info(f"[PHASE 2] offer extraction, q={stats['p2_total']}, {n_http} workers")
 
-            # phase 2: offers -- все слоты обрабатывают офферы
             http_task = asyncio.create_task(
                 run_http_workers(
                     n_http,
@@ -470,9 +539,13 @@ async def _run_session(all_filters, seen, stats, cfg, t0, listing_cache=None):
                 await url_queue.put(None)
             await http_task
 
-        # многораундовый retry -- добиваем все ошибки
+        for u in deferred:
+            await url_queue.put(u)
+
         max_rounds = cfg.get("max_retry_rounds", 3)
         for rnd in range(1, max_rounds + 1):
+            if should_stop():
+                break
             retry_snapshot = queue_snapshot(retry_queue)
             if not retry_snapshot:
                 break
@@ -484,7 +557,6 @@ async def _run_session(all_filters, seen, stats, cfg, t0, listing_cache=None):
             retry_as_url = asyncio.Queue()
             for u in retry_snapshot:
                 await retry_as_url.put(u)
-            # очищаем старую retry_queue, новые ошибки пойдут в неё же
             while not retry_queue.empty():
                 try:
                     retry_queue.get_nowait()
@@ -509,7 +581,6 @@ async def _run_session(all_filters, seen, stats, cfg, t0, listing_cache=None):
             for u in queue_snapshot(retry_as_url):
                 await retry_queue.put(u)
 
-            # если очередь не уменьшилась существенно, дальше бесполезно
             new_size = retry_queue.qsize()
             if new_size >= len(retry_snapshot) * 0.9:
                 log.info(f"[RETRY] round {rnd} barely helped ({len(retry_snapshot)} -> {new_size}), stopping")
@@ -531,16 +602,22 @@ async def _run_session(all_filters, seen, stats, cfg, t0, listing_cache=None):
             checkpoint_task.cancel()
         if watchdog_task:
             watchdog_task.cancel()
+        if pool_task:
+            pool_task.cancel()
         if stats_task:
             stats_task.cancel()
+        if refresher_task:
+            refresher_task.cancel()
         if writer_task and not writer_task.done():
             writer_task.cancel()
 
     if http_pool:
+        stats["pool_slots"] = http_pool.slot_count
+        stats["pool_alive"] = http_pool.alive
         log.info(f"{'-' * 56}")
-        log.info("  источники прокси (alive/total  ok  net  waf  quar):")
-        for name, alive_c, total_c, ok, net, waf, quar in http_pool.source_breakdown():
-            log.info(f"    {name:<11} {alive_c:>3}/{total_c:<3}  ok={ok:<6} net={net:<6} waf={waf:<5} quar={quar}")
+        log.info("  источники прокси (alive/total  ok  net  waf  cap  quar  spent):")
+        for name, alive_c, total_c, ok, net, waf, cap, quar, ret in http_pool.source_breakdown():
+            log.info(f"    {name:<11} {alive_c:>3}/{total_c:<3}  ok={ok:<6} net={net:<6} waf={waf:<5} cap={cap:<5} quar={quar:<4} spent={ret}")
 
     return completed
 
@@ -567,31 +644,36 @@ async def main():
 
     max_restarts = cfg.get("max_restarts", 5)
     cooldown = cfg.get("restart_cooldown", 60)
+    completed = []
 
     for attempt in range(max_restarts + 1):
         if is_shutting_down():
             break
 
         if attempt > 0:
+            stats["restarts"] = attempt
             log.info(
                 f"\n=== RESTART {attempt}/{max_restarts}, cooldown {cooldown}s ==="
             )
             reset_restart()
             await jittered_delay(cooldown * 0.8, cooldown * 1.2)
+            listing_cache.clear()
+            seen.clear()
             listing_cache = get_current_state()
             seen = set(listing_cache.keys())
             log.info(f"cache: {len(seen)} ids")
 
-        await _run_session(all_filters, seen, stats, cfg, t0, listing_cache)
+        completed = await _run_session(all_filters, seen, stats, cfg, t0, listing_cache)
 
         if is_shutting_down():
             break
         if not is_restarting():
             break
 
-    if not is_shutting_down() and not is_restarting():
+    plan_size = stats.get("plan_size", 0)
+    if not is_shutting_down() and not is_restarting() and len(completed) >= plan_size:
+        log.info(f"план пройден целиком ({len(completed)}/{plan_size}), чекпоинт сброшен")
         clear_checkpoint("cian")
-        clear_checkpoint("cian_plan")
 
     elapsed_min = (time.monotonic() - t0) / 60
     rate = stats["parsed"] / elapsed_min if elapsed_min > 0 else 0
@@ -604,7 +686,6 @@ async def main():
     log.info(f"  {'STOPPED' if is_shutting_down() else 'DONE'}  |  {elapsed_min:.1f}min  |  {rate:.0f}/min")
     log.info(f"{'=' * w}")
 
-    # результаты
     p2_total = stats.get("p2_total", 0) or total_planned
     p2_pct = parsed * 100 // max(p2_total, 1)
     log.info(f"  cian total:  {total_planned:>8,}  (from filter counts)")
@@ -612,11 +693,12 @@ async def main():
     log.info(f"  parsed:      {parsed:>8,}  ({p2_pct}% of queued)")
     log.info(f"  from api:    {stats.get('api_parsed', 0):>8,}  (extracted from search json)")
     log.info(f"  saved:       {saved:>8,}")
+    if stats.get("db_dropped"):
+        log.info(f"  DB DROPPED:  {stats['db_dropped']:>8,}  (строки не прошли вставку)")
     log.info(f"  repriced:    {stats.get('price_changes', 0):>8,}")
     log.info(f"  similar:     {stats.get('similar_found', 0):>8,}")
     log.info(f"{'-' * w}")
 
-    # listing фаза
     lst_cards = stats.get("listing_cards_total", 0)
     lst_skip_url = stats.get("listing_skip_url", 0)
     lst_skip_phrase = stats.get("listing_skip_phrase", 0)
@@ -626,9 +708,14 @@ async def main():
         log.info(f"  listing cards:  {lst_cards:,} total")
         log.info(f"    cached:      {lst_cached:>7,}  (already in DB)")
         log.info(f"    skipped:     {lst_skip:>7,}  (url={lst_skip_url} phrase={lst_skip_phrase})")
+    fl_incomplete = stats.get("filters_incomplete", 0)
+    if fl_incomplete:
+        log.info(f"    INCOMPLETE:  {fl_incomplete:>7,} filters, {stats.get('pages_failed', 0):,} pages lost (will retry next run)")
+    empty_pages = stats.get("empty_pages", 0)
+    if empty_pages:
+        log.info(f"    empty pages: {empty_pages:>7,}  (200 без карточек)")
     log.info(f"{'-' * w}")
 
-    # потери на offer фазе
     skip = stats.get("skipped", 0)
     no_price = stats.get("no_price", 0)
     region_skip = stats.get("region_skip", 0)
@@ -643,7 +730,6 @@ async def main():
     if no_cid: log.info(f"    no_cian_id:  {no_cid:>7,}")
     log.info(f"{'-' * w}")
 
-    # сетевые ошибки
     net = stats.get("net_errors", 0)
     waf = stats.get("waf_blocks", 0)
     cap = stats.get("captchas", 0)
@@ -652,12 +738,37 @@ async def main():
     final_failed = stats.get("final_failed", 0)
     total_errors = net + waf + cap + vpn + bad_st
     log.info(f"  net errors:  {total_errors:>7,}  (final_failed={final_failed})")
-    if net: log.info(f"    network:     {net:>7,}")
+    if stats.get("pool_starved"):
+        log.info(f"    pool empty:  {stats['pool_starved']:>7,}  (циклов без свободных слотов)")
+    if net: log.info(f"    network:     {net:>7,}  " + " ".join(
+        f"{k}={n}" for k, n in sorted(stats.get("net_kinds", {}).items(), key=lambda x: -x[1])))
     if waf: log.info(f"    waf:         {waf:>7,}")
     if cap: log.info(f"    captcha:     {cap:>7,}")
     if vpn: log.info(f"    vpn_block:   {vpn:>7,}")
     if bad_st: log.info(f"    bad_status:  {bad_st:>7,}")
     log.info(f"{'=' * w}")
+
+    if SCRAPE_RUN_ID:
+        insert_run_stats({
+            "run_id": SCRAPE_RUN_ID,
+            "minutes": round(elapsed_min, 1),
+            "plan_offers": total_planned,
+            "plan_filters": stats.get("filters_total", 0),
+            "cards": lst_cards,
+            "presence": stats.get("presence", 0),
+            "parsed": parsed,
+            "saved": saved,
+            "repriced": stats.get("price_changes", 0),
+            "empty_pages": empty_pages,
+            "incomplete": fl_incomplete,
+            "pages_lost": stats.get("pages_failed", 0),
+            "captchas": cap,
+            "net_errors": net,
+            "waf_blocks": waf,
+            "restarts": stats.get("restarts", 0),
+            "pool_slots": stats.get("pool_slots", 0),
+            "pool_alive": stats.get("pool_alive", 0),
+        })
 
     return stats
 

@@ -1,9 +1,16 @@
+{{ config(pre_hook=["set work_mem = '64MB'", "set max_parallel_workers_per_gather = 0"]) }}
+
 select
     f.cian_id,
+    f.unit_sk,
     f.first_seen,
     f.last_seen,
     f.days_on_market,
     f.event_closed,
+    u.unit_closed,
+    u.exposure_days as unit_days_on_market,
+    u.n_listings as unit_listings,
+    u.n_sellers as unit_sellers,
     f.price,
     f.mortgage_allowed,
     f.deal_conditions,
@@ -58,5 +65,6 @@ select
     f.price_max,
     f.price_points
 from {{ ref('fact_listing_lifecycle') }} f
+join {{ ref('fact_unit_lifecycle') }} u using (unit_sk)
 left join {{ ref('dim_geo') }} g on g.geo_sk = f.geo_sk
 left join {{ ref('dim_building') }} b on b.building_sk = f.building_sk

@@ -1,7 +1,14 @@
 import re
 
-_OFFER_URL = "https://www.cian.ru/sale/flat/{}/"
+from pipeline.cian.parsers import deal_type
+
+_OFFER_URL = {
+    "sale": "https://www.cian.ru/sale/flat/{}/",
+    "rent_long": "https://www.cian.ru/rent/flat/{}/",
+    "rent_day": "https://www.cian.ru/rent/flat/{}/",
+}
 _STATUS = {"new": 2, "resale": 1}
+_FOR_DAY = {"rent_long": "!1", "rent_day": "1"}
 
 
 def api_headers(base):
@@ -16,13 +23,16 @@ def api_headers(base):
 def build_json_query(filt, cfg, page=1):
     region = cfg["regions"][filt["region"]]
     rooms = [int(n) for n in re.findall(r"room(\d+)=", region["rooms"][filt["room"]])]
+    deal = filt.get("deal") or "sale"
     q = {
-        "_type": "flatsale",
+        "_type": "flatsale" if deal == "sale" else "flatrent",
         "engine_version": {"type": "term", "value": 2},
         "region": {"type": "terms", "value": [region["id"]]},
         "room": {"type": "terms", "value": rooms},
         "page": {"type": "term", "value": page},
     }
+    if deal in _FOR_DAY:
+        q["for_day"] = {"type": "term", "value": _FOR_DAY[deal]}
     lo, hi = filt.get("price_lo"), filt.get("price_hi")
     if lo or hi:
         rng = {}
@@ -59,5 +69,6 @@ def parse_search(data):
             jk = int(jk_raw) if jk_raw is not None else None
         except (TypeError, ValueError):
             jk = None
-        rows.append((_OFFER_URL.format(cid), int(price) if price else None, jk, o))
+        deal = deal_type(o)
+        rows.append((_OFFER_URL[deal].format(cid), int(price) if price else None, jk, deal, o))
     return data.get("offerCount"), rows

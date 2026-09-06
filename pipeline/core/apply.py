@@ -1,12 +1,3 @@
-"""идемпотентный раннер схемы
-
-применяет pipeline/core/schema/**/*.sql в порядке числовых префиксов имён. все DDL
-используют IF NOT EXISTS, поэтому повторный прогон безопасен.
-
-запуск:
-    python -m pipeline.core.apply
-    python -m pipeline.core.apply --dry-run
-"""
 import argparse
 import logging
 from pathlib import Path
@@ -20,7 +11,6 @@ SCHEMA_DIR = Path(__file__).parent / "schema"
 
 
 def _schema_files():
-    # сортировка по basename: числовой префикс задаёт порядок слоёв
     if not SCHEMA_DIR.exists():
         return []
     return sorted(SCHEMA_DIR.rglob("*.sql"), key=lambda p: p.name)

@@ -9,17 +9,30 @@ import sklearn
 from lightgbm import LGBMClassifier
 from sklearn.compose import ColumnTransformer
 from sklearn.metrics import average_precision_score, roc_auc_score
-from sklearn.model_selection import train_test_split
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import TargetEncoder
 
 from pipeline.ml.db import make_engine
 from pipeline.ml.features import CATEGORICAL, INPUT_COLUMNS, NUMERIC, FeatureBuilder, make_target
 
+TRAIN_SAMPLE = 160_000
+HOLDOUT_FRACTION = 0.2
+
+UNIT_COLUMNS = [c for c in INPUT_COLUMNS if c != "days_on_market"]
+
 TRAIN_QUERY = f"""
-select {', '.join(INPUT_COLUMNS)} from marts.ml_listings_wide
-where event_closed = 1 and days_on_market >= 0
-  and total_area > 0 and price > 0
+select {', '.join(INPUT_COLUMNS)} from (
+    select distinct on (unit_sk)
+        {', '.join(UNIT_COLUMNS)},
+        unit_days_on_market as days_on_market,
+        last_seen
+    from marts.ml_listings_wide
+    where unit_closed = 1 and unit_days_on_market >= 0
+      and total_area > 0 and price > 0
+    order by unit_sk, last_seen desc, cian_id desc
+) t
+order by last_seen desc
+limit {TRAIN_SAMPLE}
 """
 
 
@@ -36,16 +49,17 @@ def build_pipeline():
 
 
 def train_and_save(checkpoints_dir):
-    df = pd.read_sql(TRAIN_QUERY, make_engine())
+    df = pd.concat(pd.read_sql(TRAIN_QUERY, make_engine(), chunksize=50_000), ignore_index=True)
     y = make_target(df)
-    x_tr, x_te, y_tr, y_te = train_test_split(df, y, test_size=0.2, random_state=0, stratify=y)
+    n_te = int(len(df) * HOLDOUT_FRACTION)
     pipe = build_pipeline()
-    pipe.fit(x_tr, y_tr)
-    proba = pipe.predict_proba(x_te)[:, 1]
+    pipe.fit(df.iloc[n_te:], y.iloc[n_te:])
+    proba = pipe.predict_proba(df.iloc[:n_te])[:, 1]
+    pipe.fit(df, y)
     metrics = {
-        "pr_auc": float(average_precision_score(y_te, proba)),
-        "auc": float(roc_auc_score(y_te, proba)),
-        "n_train": int(len(x_tr)),
+        "pr_auc": float(average_precision_score(y.iloc[:n_te], proba)),
+        "auc": float(roc_auc_score(y.iloc[:n_te], proba)),
+        "n_train": int(len(df)),
         "positive_rate": float(y.mean()),
         "trained_at": datetime.now(timezone.utc).isoformat(),
         "reference_year": int(pipe.named_steps["features"].reference_year_),

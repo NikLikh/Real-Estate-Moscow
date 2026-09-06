@@ -1,4 +1,3 @@
-# VPN Chrome-расширения для ротации IP
 
 import asyncio
 import io
@@ -76,19 +75,15 @@ _stealth = Stealth(
     navigator_languages_override=["ru-RU", "ru", "en-US", "en"],
 )
 
-# скачиваем CRX через публичный API обновлений Chrome Web Store
 _CWS_URL = (
     "https://clients2.google.com/service/update2/crx"
     "?response=redirect&prodversion=136.0&acceptformat=crx2,crx3"
     "&x=id%3D{ext_id}%26uc"
 )
 
-# реестр расширений: ID в Web Store, JS для управления подключением
 EXTENSIONS = {
     "browsec": {
         "webstore_id": "omghfjlpggmjjaagoclmmobgdodcjboh",
-        # proxy.setSingleServer() единственный рабочий способ активировать VPN
-        # читаем серверы из lowLevelPac.countries.{country}, берем рандомный
         "connect_js": """async (country) => {
             const items = await new Promise(r => chrome.storage.local.get('lowLevelPac', r));
             const pac = items['lowLevelPac'];
@@ -113,7 +108,6 @@ EXTENSIONS = {
     },
 }
 
-# temp dirs для persistent context, чистим при shutdown
 _temp_dirs = []
 
 
@@ -139,7 +133,7 @@ def download_extension(ext_name):
 
     dest = EXT_BASE /"extensions" / ext_name
     if (dest / "manifest.json").exists():
-        return dest  # уже есть
+        return dest
 
     url = _CWS_URL.format(ext_id=ext_cfg["webstore_id"])
     log.info(f"[VPN] downloading {ext_name} from Chrome Web Store...")
@@ -151,7 +145,6 @@ def download_extension(ext_name):
     if not crx_data[:4] == b"Cr24":
         raise ValueError(f"downloaded file is not a valid CRX (got {crx_data[:20]})")
 
-    # распаковываем CRX в extensions/{ext_name}/
     pk_offset = crx_data.find(b"PK\x03\x04")
     if pk_offset < 0:
         raise ValueError("CRX does not contain ZIP data")
@@ -183,12 +176,10 @@ def ensure_extensions(cfg):
 
 
 def unpack_crx(crx_path, dest_dir):
-    # CRX v2/v3: zip с заголовком, пробуем как zip, потом ищем PK сигнатуру
     crx_path = Path(crx_path)
     dest_dir = Path(dest_dir)
     dest_dir.mkdir(parents=True, exist_ok=True)
 
-    # сначала пробуем как обычный zip (иногда CRX уже переименованный zip)
     try:
         with zipfile.ZipFile(crx_path) as zf:
             zf.extractall(dest_dir)
@@ -196,9 +187,7 @@ def unpack_crx(crx_path, dest_dir):
     except zipfile.BadZipFile:
         pass
 
-    # CRX3: magic (4 bytes) + version (4) + header_size (4) + header
     data = crx_path.read_bytes()
-    # ищем PK сигнатуру zip
     pk_offset = data.find(b"PK\x03\x04")
     if pk_offset < 0:
         raise ValueError(f"not a valid CRX/ZIP: {crx_path}")
@@ -224,16 +213,13 @@ def find_extension_path(ext_name, cfg_path=None):
 
 
 async def _find_ext_worker(ctx, ext_name, timeout=15):
-    # MV2 = background pages, MV3 = service workers
     deadline = asyncio.get_event_loop().time() + timeout
 
     while asyncio.get_event_loop().time() < deadline:
-        # MV2: background pages
         for page in ctx.background_pages:
             if ext_name in page.url.lower() or "chrome-extension://" in page.url:
                 return page
 
-        # MV3: service workers
         workers = ctx.service_workers if hasattr(ctx, "service_workers") else []
         for sw in workers:
             if "chrome-extension://" in sw.url:
@@ -241,7 +227,6 @@ async def _find_ext_worker(ctx, ext_name, timeout=15):
 
         await asyncio.sleep(0.5)
 
-    # fallback
     if ctx.background_pages:
         return ctx.background_pages[0]
     workers = ctx.service_workers if hasattr(ctx, "service_workers") else []
@@ -251,7 +236,6 @@ async def _find_ext_worker(ctx, ext_name, timeout=15):
 
 
 async def _activate_browsec(ctx, ext_name):
-    # закрываем onboarding-табы (клики по ним крашат browser)
     for page in ctx.pages[1:]:
         try:
             await page.close()
@@ -318,8 +302,6 @@ async def launch_vpn_context(
         f"--load-extension={ext_path}",
     ]
 
-    # --headless=new экспериментально поддерживает расширения (Chromium 112+),
-    # если не работает, вызывающий код решает
     vp = {"width": 800, "height": 600} if headless else identity.viewport
     ctx = await pw.chromium.launch_persistent_context(
         user_data_dir=str(user_data_dir),
@@ -334,12 +316,9 @@ async def launch_vpn_context(
     )
     await _stealth.apply_stealth_async(ctx)
 
-    # browsec показывает onboarding, без кликов расширение не активируется
-    # без этих кликов расширение не активируется и lowLevelPac пустой
     await asyncio.sleep(2)
     await _activate_browsec(ctx, ext_name)
 
-    # ждем background page (MV2) или service worker (MV3)
     bg = await _find_ext_worker(ctx, ext_name)
     if not bg:
         log.warning(
@@ -351,7 +330,6 @@ async def launch_vpn_context(
         log.warning(f"[VPN] {ext_name}: no connect_js, extension needs manual research")
         return ctx, bg
 
-    # принимаем consent через storage (без кликов по UI)
     try:
         await bg.evaluate(
             """async () => {
@@ -364,7 +342,6 @@ async def launch_vpn_context(
     except Exception:
         pass
 
-    # ждем пока PAC данные загрузятся
     await _wait_for_pac(bg, ext_name, timeout=15)
 
     try:
@@ -385,7 +362,6 @@ async def launch_vpn_context(
 
 
 async def discover_vpn_servers(pw, ext_name, cfg_path=None):
-    # для servers: auto в конфиге
     identity = SessionIdentity()
     ext_cfg = EXTENSIONS.get(ext_name)
     if not ext_cfg:
@@ -439,17 +415,15 @@ async def discover_vpn_servers(pw, ext_name, cfg_path=None):
 
 
 async def switch_vpn_server(bg, ext_name, server_id):
-    # без перезапуска browser (~1-3с вместо ~15с)
     ext_cfg = EXTENSIONS.get(ext_name)
     if not ext_cfg:
         raise ValueError(f"unknown VPN extension: {ext_name}")
     result = await bg.evaluate(ext_cfg["connect_js"], server_id)
-    await asyncio.sleep(2)  # дать расширению подключиться
+    await asyncio.sleep(2)
     return result
 
 
 async def check_vpn_ip(ctx, timeout=10000):
-    # ipify а не httpbin, т.к. httpbin не всегда проходит через PAC proxy
     page = await ctx.new_page()
     try:
         await page.goto("https://api.ipify.org", timeout=timeout)
@@ -458,7 +432,6 @@ async def check_vpn_ip(ctx, timeout=10000):
             return text
     except Exception as e:
         log.debug(f"[VPN] ip check via ipify failed: {e}")
-    # fallback на ifconfig.me
     try:
         await page.goto("https://ifconfig.me/ip", timeout=timeout)
         text = (await page.inner_text("body")).strip()

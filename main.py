@@ -3,7 +3,6 @@ import asyncio
 
 
 def main():
-    # всё запускается через субкоманды, например python main.py scrape
     parser = argparse.ArgumentParser(description="Real Estate DA pipeline")
     sub = parser.add_subparsers(dest="command")
 
@@ -16,7 +15,6 @@ def main():
 
     args = parser.parse_args()
 
-    # ленивые импорты, чтобы не тянуть тяжелые зависимости пока не нужны
     if args.command == "scrape":
         from pipeline.cian.cian import main as cian_main
 

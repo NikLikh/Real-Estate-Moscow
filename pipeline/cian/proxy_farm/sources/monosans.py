@@ -1,6 +1,3 @@
-# proxy_farm/sources/monosans.py
-# monosans proxy-list JSON, единственный стабильный бесплатный источник SOCKS5
-# HTTP прокси мертвы как класс (0/10134 при E2E тесте), берём только socks5
 import logging
 
 from curl_cffi.requests import AsyncSession
@@ -25,7 +22,6 @@ async def discover(cfg=None) -> list[tuple[str, str, str]]:
         log.warning("[HTTP] monosans: unexpected JSON format")
         return []
 
-    # фильтруем только socks5, HTTP мертвы
     candidates = []
     idx = 0
     for item in data:
@@ -36,7 +32,6 @@ async def discover(cfg=None) -> list[tuple[str, str, str]]:
         if not host or not port:
             continue
 
-        # формат geolocation изменился, страна теперь тут
         geo = item.get("geolocation", {})
         country = geo.get("country", {})
         cc = country.get("iso_code", "xx") if isinstance(country, dict) else "xx"
@@ -52,6 +47,8 @@ async def discover(cfg=None) -> list[tuple[str, str, str]]:
 
     log.info(f"[HTTP] monosans: {len(candidates)} SOCKS5 candidates, validating S1+S2...")
 
-    result = await validate_batch_s1s2(candidates, concurrency=10, timeout=10)
+    result = await validate_batch_s1s2(
+        candidates, concurrency=(cfg or {}).get("validation_concurrency", 30), timeout=10
+    )
     log.info(f"[HTTP] monosans: {len(result)}/{len(candidates)} passed S1+S2")
     return result

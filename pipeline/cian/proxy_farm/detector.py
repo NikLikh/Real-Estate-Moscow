@@ -1,6 +1,6 @@
-# proxy_farm/detector.py
-# детекторы WAF, captcha, VPN-блокировок cian.ru
-# используются и в валидации прокси, и в fetch offer
+
+MAX_BODY_BYTES = 5_000_000
+SCAN_CHARS = 32_768
 
 WAF_RATE_LIMIT_SIGNS = ["cian_waf_block", "cian_waf_rate_limit"]
 
@@ -29,7 +29,7 @@ def headers():
 def is_waf(html: str, status: int) -> bool:
     if status in (403, 429, 503):
         return True
-    low = html.lower()
+    low = html[:SCAN_CHARS].lower()
     return any(sign in low for sign in WAF_RATE_LIMIT_SIGNS)
 
 
@@ -37,10 +37,10 @@ def is_captcha(html: str, url: str = "") -> bool:
     url_low = url.lower()
     if "captcha" in url_low or "showcaptcha" in url_low:
         return True
-    low = html.lower()
+    low = html[:SCAN_CHARS].lower()
     return any(sign.lower() in low for sign in CAPTCHA_SIGNS)
 
 
 def is_vpn_block(html: str) -> bool:
-    low = html.lower()
+    low = html[:SCAN_CHARS].lower()
     return any(sign.lower() in low for sign in VPN_SIGNS)

@@ -1,4 +1,3 @@
-"""Загрузка angultiaev/flat-sale-m24ml (~162 ГБ) через remotezip."""
 
 import json
 import logging

@@ -1,3 +1,5 @@
+{{ config(pre_hook=["set work_mem = '64MB'", "set max_parallel_workers_per_gather = 0"]) }}
+
 with seq as (
     select
         cian_id,

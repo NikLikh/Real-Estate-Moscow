@@ -8,8 +8,7 @@ from curl_cffi.requests import AsyncSession
 from pipeline.cian.api import api_headers, build_jk_query, build_json_query, parse_search
 from pipeline.cian.parsers import extract_cian_id, extract_region_id, map_offer_from_api, parse_offer_from_json, parse_similar_urls_from_html
 from pipeline.cian.runtime import should_stop
-from pipeline.cian.proxy_farm.detector import is_waf, is_captcha, is_vpn_block, headers
-from pipeline.cian.proxy_farm.refresher import run_refresher
+from pipeline.cian.proxy_farm.detector import MAX_BODY_BYTES, SCAN_CHARS, is_waf, is_captcha, is_vpn_block, headers
 
 log = logging.getLogger("re")
 
@@ -31,20 +30,23 @@ async def _emit_api_offer(offer_obj, cid, href, row_queue, stats, worker):
     return True
 
 
-async def _register_card(cid, href, card_price, offer_obj, seen, listing_cache,
+async def _register_card(cid, href, card_price, offer_obj, deal, seen, listing_cache,
                          url_queue, row_queue, stats, cfg, worker):
     api_extract = bool(cfg.get("api_full_extract")) and row_queue is not None
     info = listing_cache.get(cid) if listing_cache else None
     if info is not None:
         stats["listing_cached"] = stats.get("listing_cached", 0) + 1
+        info["_deal"] = deal
         seen.add(cid)
-        if card_price and info.get("price") and card_price != info["price"] and not info.get("_repriced"):
+        if card_price and card_price != info.get("price") and not info.get("_repriced"):
             info["_repriced"] = True
             info["price"] = card_price
             info["_touched"] = True
             info["_card_price"] = card_price
             stats["price_changes"] = stats.get("price_changes", 0) + 1
-            if api_extract and offer_obj is not None and await _emit_api_offer(offer_obj, cid, href, row_queue, stats, worker):
+            if api_extract and offer_obj is not None:
+                if not await _emit_api_offer(offer_obj, cid, href, row_queue, stats, worker):
+                    stats["no_price"] = stats.get("no_price", 0) + 1
                 return "repriced"
             await url_queue.put(href)
             return "repriced"
@@ -56,14 +58,15 @@ async def _register_card(cid, href, card_price, offer_obj, seen, listing_cache,
         stats["listing_cached"] = stats.get("listing_cached", 0) + 1
         return "dup"
     seen.add(cid)
-    if api_extract and offer_obj is not None and await _emit_api_offer(offer_obj, cid, href, row_queue, stats, worker):
+    if api_extract and offer_obj is not None:
+        if not await _emit_api_offer(offer_obj, cid, href, row_queue, stats, worker):
+            stats["no_price"] = stats.get("no_price", 0) + 1
         return "new"
     await url_queue.put(href)
     return "new"
 
 
 async def fetch_offer(session, url, slot, pool, stats, cfg):
-    # ждём concurrent-слот для этого прокси (ограничивает нагрузку на IP)
     await pool.acquire_concurrent(slot)
     t_fetch = time.monotonic()
     try:
@@ -74,30 +77,32 @@ async def fetch_offer(session, url, slot, pool, stats, cfg):
             allow_redirects=True,
         )
     except Exception as e:
-        pool.release_concurrent(slot)
         log.debug(f"[HTTP] {slot.label} network error: {e}")
         stats["net_errors"] = stats.get("net_errors", 0) + 1
-        pool.report_net_error(slot, cfg.get("net_error_threshold", 3), cfg.get("net_error_cooldown", 20), cfg.get("net_error_quarantine", 5))
+        pool.report_net_error(slot, cfg.get("net_error_threshold", 3), cfg.get("net_error_cooldown", 20), cfg.get("net_error_quarantine", 8))
         return None
-    pool.release_concurrent(slot)
+    finally:
+        pool.release_concurrent(slot)
     fetch_ms = (time.monotonic() - t_fetch) * 1000
     stats["fetch_ms_total"] = stats.get("fetch_ms_total", 0) + fetch_ms
     stats["fetch_count"] = stats.get("fetch_count", 0) + 1
 
-    html = resp.text
-    if len(html) > 5_000_000:
+    if len(resp.content) > MAX_BODY_BYTES:
         stats["html_too_large"] = stats.get("html_too_large", 0) + 1
         return "skipped"
+    html = resp.text
     if slot.budget and slot.reqs >= slot.budget:
         pool.report_budget(slot, cfg.get("http_budget_cooldown", 300))
 
     if is_waf(html, resp.status_code):
-        pool.report_waf(slot, cfg.get("http_waf_cooldown", 30))
+        pool.report_waf(slot, cfg.get("http_waf_cooldown", 35))
         stats["waf_blocks"] = stats.get("waf_blocks", 0) + 1
         return None
 
     if is_captcha(html, str(resp.url)):
-        pool.report_waf(slot, cfg.get("http_captcha_cooldown", 60))
+        pool.report_captcha(slot, cfg.get("http_captcha_cooldown", 2),
+                            cfg.get("captcha_streak_limit", 6),
+                            cfg.get("captcha_streak_cooldown", 1800))
         stats["captchas"] = stats.get("captchas", 0) + 1
         return None
 
@@ -108,14 +113,12 @@ async def fetch_offer(session, url, slot, pool, stats, cfg):
 
     if resp.status_code != 200:
         stats["bad_status"] = stats.get("bad_status", 0) + 1
-        # 404/410 = объявление удалено, ретраить бессмысленно
         if resp.status_code in (404, 410):
             return "skipped"
         return None
 
     pool.report_ok(slot)
 
-    # комнаты и доли пропускаем, не нужен BS4
     html_lower = html.lower()
     if "комната в " in html_lower or "продается доля" in html_lower:
         stats["skipped"] = stats.get("skipped", 0) + 1
@@ -174,13 +177,11 @@ async def http_offer_worker(
         return sessions[proxy]
 
     skip_urls = cfg.get("skip_url_parts", [])
-    skip_urls_set = set(skip_urls)
     seen_urls = seen if seen is not None else set()
     batch_size = cfg.get("http_offer_batch", 1)
 
     try:
-        while True:
-            # набираем batch
+        while not should_stop():
             batch = []
             stop = False
             for _ in range(batch_size):
@@ -215,13 +216,13 @@ async def http_offer_worker(
 
             t_cycle = time.monotonic()
 
-            # acquire слоты, запускаем fetch параллельно
-            # per-proxy concurrent ограничен в pool.acquire_concurrent()
             pending = []
+            starved = False
             for url in batch:
                 slot = await pool.acquire()
                 if not slot:
                     await retry_queue.put(url)
+                    starved = True
                     continue
                 session = await get_session(slot.proxy)
                 pending.append((url, fetch_offer(session, url, slot, pool, stats, cfg)))
@@ -236,7 +237,9 @@ async def http_offer_worker(
                     elif result is None:
                         await retry_queue.put(url)
                     elif result == "skipped":
-                        seen_urls.add(url)
+                        cid = extract_cian_id(url)
+                        if cid:
+                            seen_urls.add(cid)
                     else:
                         rows, timings, similar_urls = result
                         timings["worker"] = name
@@ -244,7 +247,9 @@ async def http_offer_worker(
                         stats["parsed"] = stats.get("parsed", 0) + 1
                         for sim_url in similar_urls:
                             sim_id = extract_cian_id(sim_url)
-                            if sim_id and sim_url not in skip_urls_set and sim_id not in seen_urls:
+                            if any(part in sim_url for part in skip_urls):
+                                continue
+                            if sim_id and sim_id not in seen_urls:
                                 seen_urls.add(sim_id)
                                 url_queue.put_nowait(sim_url)
                                 stats["similar_found"] = stats.get("similar_found", 0) + 1
@@ -252,8 +257,11 @@ async def http_offer_worker(
             cycle_ms = (time.monotonic() - t_cycle) * 1000
             stats["cycle_ms_total"] = stats.get("cycle_ms_total", 0) + cycle_ms
             stats["cycle_count"] = stats.get("cycle_count", 0) + 1
+
+            if starved:
+                stats["pool_starved"] = stats.get("pool_starved", 0) + 1
+                await asyncio.sleep(cfg.get("pool_starved_backoff", 2))
     finally:
-        # shared sessions закрываются в run_http_workers
         if shared_sessions is None:
             for s in sessions.values():
                 await s.close()
@@ -263,9 +271,6 @@ async def run_http_workers(
     n, url_queue, retry_queue, row_queue, pool, stats, cfg,
     seen=None,
 ):
-    refresher = asyncio.create_task(run_refresher(pool, cfg))
-
-    # одна сессия на прокси, шарим между воркерами
     shared_sessions = {}
 
     tasks = [
@@ -287,7 +292,6 @@ async def run_http_workers(
     try:
         await asyncio.gather(*tasks)
     finally:
-        refresher.cancel()
         for s in shared_sessions.values():
             await s.close()
 
@@ -301,36 +305,56 @@ async def _search_rows(session, body, slot, pool, stats, cfg, endpoint=None):
             headers=api_headers(headers()),
             timeout=cfg.get("http_timeout", 15),
         )
-    except Exception:
-        pool.release_concurrent(slot)
+    except Exception as e:
         stats["net_errors"] = stats.get("net_errors", 0) + 1
-        pool.report_net_error(slot, cfg.get("net_error_threshold", 3), cfg.get("net_error_cooldown", 20), cfg.get("net_error_quarantine", 5))
-        return None
-    pool.release_concurrent(slot)
+        kinds = stats.setdefault("net_kinds", {})
+        kinds[type(e).__name__] = kinds.get(type(e).__name__, 0) + 1
+        pool.report_net_error(slot, cfg.get("net_error_threshold", 3), cfg.get("net_error_cooldown", 20), cfg.get("net_error_quarantine", 8))
+        return "net", None, None
+    finally:
+        pool.release_concurrent(slot)
 
-    if is_waf(resp.text, resp.status_code):
-        pool.report_waf(slot, cfg.get("http_waf_cooldown", 30))
+    if len(resp.content) > MAX_BODY_BYTES:
+        stats["net_errors"] = stats.get("net_errors", 0) + 1
+        pool.report_net_error(slot, cfg.get("net_error_threshold", 3), cfg.get("net_error_cooldown", 20), cfg.get("net_error_quarantine", 8))
+        return "net", None, None
+
+    head = resp.content[:SCAN_CHARS].decode("utf-8", "ignore")
+
+    if is_waf(head, resp.status_code):
+        pool.report_waf(slot, cfg.get("http_waf_cooldown", 35))
         stats["waf_blocks"] = stats.get("waf_blocks", 0) + 1
-        return None
+        return "waf", None, None
 
-    if is_captcha(resp.text, str(resp.url)):
-        pool.report_waf(slot, cfg.get("http_captcha_cooldown", 60))
+    if is_captcha(head, str(resp.url)):
+        pool.report_captcha(slot, cfg.get("http_captcha_cooldown", 2),
+                            cfg.get("captcha_streak_limit", 6),
+                            cfg.get("captcha_streak_cooldown", 1800))
         stats["captchas"] = stats.get("captchas", 0) + 1
-        return None
+        return "captcha", None, None
 
     if resp.status_code != 200:
         stats["bad_status"] = stats.get("bad_status", 0) + 1
-        return None
+        return "status", None, None
 
     pool.report_ok(slot)
     try:
         data = resp.json()["data"]
     except Exception:
-        return None
+        return "badjson", None, None
 
-    _, rows = parse_search(data)
+    count, rows = parse_search(data)
     stats["listing_cards_total"] = stats.get("listing_cards_total", 0) + len(rows)
-    return rows
+    if not rows:
+        stats["empty_pages"] = stats.get("empty_pages", 0) + 1
+        return "empty", rows, count
+    return "ok", rows, count
+
+
+def _scan_listing_pages(sizes, cards_per_page):
+    exhausted = any(n == 0 for n in sizes)
+    lost = sum(1 for n in sizes if n is None)
+    return exhausted, lost
 
 
 async def http_listing_worker(
@@ -349,42 +373,101 @@ async def http_listing_worker(
 
     max_pages = cfg.get("max_pages", 54)
     cards_per_page = cfg.get("cards_per_page", 28)
+    page_tries = cfg.get("listing_page_tries", 8)
+    page_batch = cfg.get("listing_page_batch", 4)
+    empty_tries = cfg.get("listing_empty_tries", 3)
+    slot_wait_limit = cfg.get("slot_wait_limit", 120)
 
-    async def fetch_page(filt, pg):
+    async def fetch_page(filt, pg, expect_full):
+        body = build_json_query(filt, cfg, pg)
         async with sem:
-            for _ in range(6):
-                slot = await pool.acquire()
-                if not slot:
-                    await asyncio.sleep(0.5)
-                    continue
-                session = await get_session(slot.proxy)
-                result = await _search_rows(session, build_json_query(filt, cfg, pg), slot, pool, stats, cfg)
-                if result is None:
-                    await asyncio.sleep(1)
-                    continue
-                return result
-            return []
+            stats["listing_inflight"] = stats.get("listing_inflight", 0) + 1
+            try:
+                return await _fetch_page_inner(filt, pg, expect_full, body)
+            finally:
+                stats["listing_inflight"] -= 1
+
+    async def _fetch_page_inner(filt, pg, expect_full, body):
+        empty_seen = 0
+        tries = 0
+        waits = 0
+        while tries < page_tries and waits < slot_wait_limit:
+            if should_stop():
+                return None, None
+            slot = await pool.acquire()
+            if not slot:
+                waits += 1
+                await asyncio.sleep(0.5)
+                continue
+            tries += 1
+            session = await get_session(slot.proxy)
+            status, rows, count = await _search_rows(session, body, slot, pool, stats, cfg)
+            if status == "ok":
+                return rows, count
+            if status == "empty":
+                empty_seen += 1
+                if not expect_full or empty_seen >= empty_tries:
+                    return rows, count
+        return None, None
 
     try:
         for filt in filters:
+            if should_stop():
+                break
             label = filt["label"]
             offer_count = filt.get("offer_count") or 0
-            pages_for_filter = math.ceil(offer_count / cards_per_page) if offer_count else max_pages
-            pages_for_filter = min(pages_for_filter, max_pages)
+            bound = min(math.ceil(offer_count / cards_per_page), max_pages) if offer_count else max_pages
+            full_pages = min(offer_count // cards_per_page, max_pages) if offer_count else 0
 
-            pages = await asyncio.gather(*[fetch_page(filt, pg) for pg in range(1, pages_for_filter + 1)])
-
-            for result in pages:
-                for href, card_price, jk, offer_obj in result:
-                    if jk and zhk_ids is not None:
-                        zhk_ids.add(jk)
-                    cid = extract_cian_id(href)
-                    if not cid:
+            sizes = []
+            pg = 1
+            real_count = None
+            got = 0
+            while pg <= bound:
+                tail = next((n for n in reversed(sizes) if n is not None), None)
+                partial = tail is not None and 0 < tail < cards_per_page
+                step = 1 if real_count is None or partial else page_batch
+                last = min(pg + step - 1, bound)
+                chunk = await asyncio.gather(*[
+                    fetch_page(filt, p, p == 1 if real_count is None else p <= full_pages)
+                    for p in range(pg, last + 1)
+                ])
+                if real_count is None:
+                    for _rows, cnt in chunk:
+                        if cnt:
+                            real_count = cnt
+                            stats["count_corrected"] = stats.get("count_corrected", 0) + (cnt != offer_count)
+                            bound = min(math.ceil(cnt / cards_per_page), max_pages)
+                            full_pages = min(cnt // cards_per_page, max_pages)
+                            break
+                for rows, _c in chunk:
+                    sizes.append(None if rows is None else len(rows))
+                    if not rows:
                         continue
-                    await _register_card(cid, href, card_price, offer_obj, seen, listing_cache,
-                                         url_queue, row_queue, stats, cfg, name)
+                    got += len(rows)
+                    for href, card_price, jk, deal, offer_obj in rows:
+                        if jk and zhk_ids is not None:
+                            zhk_ids.add(jk)
+                        cid = extract_cian_id(href)
+                        if not cid:
+                            continue
+                        await _register_card(cid, href, card_price, offer_obj, deal, seen, listing_cache,
+                                             url_queue, row_queue, stats, cfg, name)
+                if real_count and got >= real_count:
+                    break
+                edge = next((n for n in reversed(sizes) if n is not None), None)
+                if real_count and edge and edge < cards_per_page and got + cards_per_page > real_count:
+                    break
+                if _scan_listing_pages(sizes, cards_per_page)[0]:
+                    break
+                pg = last + 1
 
-            completed.append(label)
+            failed_pages = sum(1 for n in sizes if n is None)
+            if failed_pages:
+                stats["pages_failed"] = stats.get("pages_failed", 0) + failed_pages
+                stats["filters_incomplete"] = stats.get("filters_incomplete", 0) + 1
+            else:
+                completed.append(label)
             stats["filters_done"] = stats.get("filters_done", 0) + 1
     finally:
         if shared_sessions is None:
@@ -431,7 +514,8 @@ async def run_http_zhk(jk_ids, url_queue, seen, pool, stats, cfg, row_queue=None
     stats["zhk_capped"] = 0
     shared_sessions = {}
     sem = asyncio.Semaphore(cfg.get("http_listing_concurrency", 100))
-    max_pages = cfg.get("max_pages", 54)
+    max_pages = cfg.get("zhk_max_pages", 40)
+    slot_wait_limit = cfg.get("slot_wait_limit", 120)
     endpoint = cfg.get("api_zhk_endpoint")
 
     async def get_session(proxy):
@@ -442,35 +526,33 @@ async def run_http_zhk(jk_ids, url_queue, seen, pool, stats, cfg, row_queue=None
         return shared_sessions[proxy]
 
     async def drill(jk_id):
+        if should_stop():
+            return
         async with sem:
-            empty = 0
             fails = 0
+            waits = 0
             page = 1
-            while page <= max_pages and fails < 6:
+            while page <= max_pages and fails < 6 and waits < slot_wait_limit and not should_stop():
                 slot = await pool.acquire()
                 if not slot:
-                    fails += 1
+                    waits += 1
                     await asyncio.sleep(0.5)
                     continue
                 session = await get_session(slot.proxy)
-                rows = await _search_rows(session, build_jk_query(jk_id, page), slot, pool, stats, cfg, endpoint=endpoint)
+                body = build_jk_query(jk_id, page)
+                status, rows, _c = await _search_rows(session, body, slot, pool, stats, cfg, endpoint=endpoint)
                 if rows is None:
                     fails += 1
                     await asyncio.sleep(1)
                     continue
                 fails = 0
                 if not rows:
-                    empty += 1
-                    if empty >= 2:
-                        break
-                    page += 1
-                    continue
-                empty = 0
-                for href, card_price, _jk, offer_obj in rows:
+                    break
+                for href, card_price, _jk, deal, offer_obj in rows:
                     cid = extract_cian_id(href)
                     if not cid:
                         continue
-                    outcome = await _register_card(cid, href, card_price, offer_obj, seen, listing_cache,
+                    outcome = await _register_card(cid, href, card_price, offer_obj, deal, seen, listing_cache,
                                                    url_queue, row_queue, stats, cfg, "zhk")
                     if outcome == "new":
                         stats["zhk_new"] = stats.get("zhk_new", 0) + 1
@@ -479,8 +561,13 @@ async def run_http_zhk(jk_ids, url_queue, seen, pool, stats, cfg, row_queue=None
                 stats["zhk_capped"] = stats.get("zhk_capped", 0) + 1
             stats["zhk_done"] = stats.get("zhk_done", 0) + 1
 
+    tasks = [asyncio.create_task(drill(j)) for j in jk_ids]
     try:
-        await asyncio.gather(*[drill(j) for j in jk_ids])
+        done, pending = await asyncio.wait(tasks, timeout=cfg.get("zhk_phase_timeout", 420))
+        for t in pending:
+            t.cancel()
+        if pending:
+            log.info(f"[PHASE 0] таймаут, отменено {len(pending)} ЖК")
     finally:
         for s in shared_sessions.values():
             await s.close()

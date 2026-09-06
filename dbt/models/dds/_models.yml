@@ -24,3 +24,26 @@ models:
         tests:
           - unique
           - not_null
+      - name: unit_sk
+        tests:
+          - not_null
+  - name: fact_unit_lifecycle
+    columns:
+      - name: unit_sk
+        tests:
+          - unique
+          - not_null
+      - name: n_listings
+        tests:
+          - not_null
+  - name: fact_rent_lifecycle
+    columns:
+      - name: cian_id
+        tests:
+          - unique
+          - not_null
+      - name: deal_type
+        tests:
+          - not_null
+          - accepted_values:
+              values: ['rent_long', 'rent_day']

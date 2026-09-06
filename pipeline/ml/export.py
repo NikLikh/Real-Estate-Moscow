@@ -23,7 +23,7 @@ def _is_bool_col(s):
 
 
 def _prepare_chunk(df):
-    df = df.drop(columns=["first_seen", "last_seen", "event_closed"])
+    df = df.drop(columns=["first_seen", "last_seen", "event_closed", "unit_sk", "unit_closed"])
     for col in df.select_dtypes(include=["datetimetz"]).columns:
         df[col] = df[col].dt.tz_localize(None)
     df["is_hot"] = (df["hot_score"] >= HOT_THRESHOLD).astype(int)
